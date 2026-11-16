@@ -24,11 +24,15 @@ Euclidean distances with exact relabeling P; principal components; groups of mea
 Bundle-level models (robust measures): standardized value ~ genotype + turn, random mouse intercept and field
 variance component (REML); variance shares mouse / field / bundle.
 
-Writes: phenotype_field_values_long.csv, bundle_phenotype_robustness.csv, phenotype_statistics_all.csv,
+Groups: control first (CONTROL_GROUP), then any other groups; genotype from the settings or from a table given
+with --groups (columns mouse, group) or saved as RESULTS\\groups.csv, so the statistics can be redone without
+remeasuring. Every test is given twice (column 'fields'): with flagged fields left out, and with all fields.
+Writes: fields_index.csv (every image: mouse, genotype, turn, stain panel, measured or not and why, flag and reason),
+phenotype_field_values_long.csv, bundle_phenotype_robustness.csv, phenotype_statistics_all.csv,
 phenotype_panel_multivariate.csv, phenotype_panel_principal_components.csv, phenotype_bundle_level_models.csv
 Run (imaging env, scripts folder):  python phenotype_statistics.py
 """
-import os, sys, glob, warnings
+import os, sys, glob, re, json, math, argparse, warnings
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline_settings as S
 import hair_cell_rows_classify as hrc
@@ -39,13 +43,43 @@ from scipy.spatial import cKDTree
 from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import linkage, fcluster
 
-R = S.RESULTS; GR = ["control", "Smad3", "beta-catenin"]; TYPES = ["IHC", "OHC1", "OHC2", "OHC3"]
+R = S.RESULTS; TYPES = ["IHC", "OHC1", "OHC2", "OHC3"]
+GR = []          # control first, then the other groups (set in main from the feature table and any --groups table)
+MAX_ARRANGEMENTS = 20000   # above this many relabelings, a random sample of this size is used (seed 1)
+
+
+def tag(g):
+    return re.sub(r"[^0-9A-Za-z]+", "_", str(g)).strip("_")
 META = ["field", "cell", "row", "shape_check", "condition", "x", "y", "noise_sd"]
 
 
-def field_info():
+def field_info(groups_csv=None):
+    """Feature table fields with mouse, turn and damage flag; genotype from the settings, replaced per mouse by an
+    optional table (columns mouse, group) so the statistics can be redone without rerunning the measurements."""
     ft = pd.read_csv(os.path.join(R, "feature_table_fields.csv")).set_index("field")
+    if groups_csv:
+        g = pd.read_csv(groups_csv); g = dict(zip(g.iloc[:, 0].astype(str).str.strip(), g.iloc[:, 1].astype(str).str.strip()))
+        ft["group"] = ft.mouse.astype(str).map(g).where(lambda v: v.notna() & (v != "") & (v != "nan"))
+    ft["damaged"] = ft.damaged.fillna(False).astype(bool)
     return ft
+
+
+def field_index(FT):
+    """Every image in the raw folder: mouse, genotype, turn, stain panel, voxel size, measured or not and why, and
+    the damage flag with its reason."""
+    rows = []; ds = {}
+    if getattr(S, "DATASET_SETTINGS", ""):
+        with open(S.DATASET_SETTINGS, encoding="utf-8") as fh: ds = json.load(fh)
+    panel = ds.get("panel_of_field", {}); excl = dict(getattr(S, "DAMAGED", {}) or {}); excl.update(ds.get("excluded_fields", {}))
+    for f in S.raw_fields():
+        r = dict(field=f, mouse=S.mouse_of(f), stain_panel=panel.get(f, ""), measured=f in FT.index)
+        if f in FT.index:
+            r.update(group=FT.group.get(f), turn=FT.turn.get(f), flagged=bool(FT.damaged.get(f)))
+        reason = excl.get(f, "")
+        r["flag_reason"] = reason if not reason.startswith("not measured") else ""
+        r["not_measured_reason"] = reason if reason.startswith("not measured") else ("" if r["measured"] else "no measurement output")
+        rows.append(r)
+    return pd.DataFrame(rows)
 
 
 def robustness(PH, FT, MEAS):
@@ -77,7 +111,7 @@ def long_table(FT):
     for f, idx in B.groupby("field").groups.items():
         h = hc[hc.field == f]; d, i = cKDTree(h[["x", "y"]].values).query(B.loc[idx, ["x", "y"]].values); B.loc[idx, "u"] = h.u.values[i]
     for c in ["group", "turn", "mouse"]: B[c] = B.field.map(FT[c])
-    B = B[~B.field.map(FT.damaged).astype(bool)]
+    B["flagged"] = B.field.map(FT.damaged).fillna(False).astype(bool)
     L = []
     def add(df, ctcol, fam, ms, prefix=""):
         for m in ms:
@@ -86,7 +120,7 @@ def long_table(FT):
     add(g[MEAS].median().reset_index(), "row", "bundle panel: median", MEAS)
     add(g[MEAS].quantile(0.1).reset_index(), "row", "bundle panel: 10th percentile", MEAS, "p10 ")
     add(g[MEAS].quantile(0.9).reset_index(), "row", "bundle panel: 90th percentile", MEAS, "p90 ")
-    ctl = B[B.group == "control"]; cm = sorted(ctl.mouse.unique())
+    ctl = B[(B.group == GR[0]) & ~B.flagged] if GR else B.iloc[:0]; cm = sorted(ctl.mouse.unique())
     qs = {None: ctl.groupby(["row", "turn"])[MEAS].quantile([0.05, 0.95]).unstack()}
     for m_ in cm: qs[m_] = ctl[ctl.mouse != m_].groupby(["row", "turn"])[MEAS].quantile([0.05, 0.95]).unstack()
     ext = []
@@ -94,14 +128,17 @@ def long_table(FT):
         t = FT.turn[f]; mo = FT.mouse[f]; qq = qs[mo] if mo in cm else qs[None]; r = dict(field=f, row=rw)
         for m in MEAS:
             v = gg[m].dropna()
-            if len(v) < 5 or (rw, t) not in qq.index: continue
-            lo, hi = qq.loc[(rw, t), (m, 0.05)], qq.loc[(rw, t), (m, 0.95)]
-            r[m + "__iqr"] = np.subtract(*np.percentile(v, [75, 25])); r[m + "__out"] = float(((v < lo) | (v > hi)).mean())
+            if len(v) < 5: continue
+            r[m + "__iqr"] = np.subtract(*np.percentile(v, [75, 25]))
+            if (rw, t) in qq.index:
+                lo, hi = qq.loc[(rw, t), (m, 0.05)], qq.loc[(rw, t), (m, 0.95)]; r[m + "__out"] = float(((v < lo) | (v > hi)).mean())
             k = gg.dropna(subset=[m, "u"]); r[m + "__grad"] = 100 * np.polyfit(k.u, k[m], 1)[0] if len(k) >= 6 and np.ptp(k.u) > 20 else np.nan
         ext.append(r)
     E = pd.DataFrame(ext)
     for suf, fam in [("__iqr", "bundle panel: within-field spread (IQR)"), ("__out", "bundle panel: share outside control 5-95% range"), ("__grad", "bundle panel: gradient along field per 100 um")]:
-        cols = [c for c in E.columns if c.endswith(suf)]; add(E[["field", "row"] + cols].rename(columns={c: c[:-len(suf)] for c in cols}), "row", fam, [c[:-len(suf)] for c in cols])
+        cols = [c for c in E.columns if c.endswith(suf)]
+        if not cols: continue
+        add(E[["field", "row"] + cols].rename(columns={c: c[:-len(suf)] for c in cols}), "row", fam, [c[:-len(suf)] for c in cols])
     CF = pd.read_csv(os.path.join(R, "cell_phenotype_fields.csv"))
     add(CF, "row", "hair cell surface", ["surface_area_um2", "surface_perimeter_um", "surface_eccentricity", "surface_solidity", "surface_elongation", "surface_axis_vs_row_deg", "surface_area_cv", "nearest_cell_um"])
     add(CF, "row", "row packing", ["gaps_per_100um", "spacing_cv"])
@@ -138,24 +175,33 @@ def long_table(FT):
             add(rf.rename(columns={rw: "per_100um"}).assign(cell_type=rw), "cell_type", "density (corrected hand reference)", ["per_100um"])
         add(rf.assign(cell_type="all"), "cell_type", "density (corrected hand reference)", ["outer_hair_cells_per_100um"])
     LONG = pd.concat(L, ignore_index=True)
-    for c in ["group", "turn", "mouse", "damaged"]: LONG[c] = LONG.field.map(FT[c])
-    LONG = LONG[~LONG.damaged.astype(bool) & LONG.group.isin(GR)]
+    for c in ["group", "turn", "mouse"]: LONG[c] = LONG.field.map(FT[c])
+    LONG["flagged"] = LONG.field.map(FT.damaged).fillna(False).astype(bool)
     return LONG, PH, B, MEAS
 
 
 def assignments(mg):
-    codes = mg.map({g: i for i, g in enumerate(GR)}).values; sizes = [(codes == k).sum() for k in range(3)]; n = len(codes); idx = list(range(n)); out = []
-    for a in combinations(idx, sizes[0]):
-        rest = [i for i in idx if i not in a]
-        for b in combinations(rest, sizes[1]):
-            lab = np.full(n, 2); lab[list(a)] = 0; lab[list(b)] = 1; out.append(lab)
-    return np.array(out), codes
+    """All relabelings of the mice keeping the group sizes (codes follow GR), or a random sample of MAX_ARRANGEMENTS
+    of them (the observed labels first) when there are more."""
+    codes = mg.map({g: i for i, g in enumerate(GR)}).values; k = len(GR); sizes = [(codes == j).sum() for j in range(k)]; n = len(codes)
+    total = 1; rem = n
+    for sz in sizes: total *= math.comb(rem, sz); rem -= sz
+    if total > MAX_ARRANGEMENTS:
+        rng = np.random.default_rng(1); out = [codes] + [rng.permutation(codes) for _ in range(MAX_ARRANGEMENTS - 1)]
+        return np.array(out), codes
+    out = []
+    def rec(avail, j, lab):
+        if j == k - 1:
+            lab = lab.copy(); lab[list(avail)] = j; out.append(lab); return
+        for c in combinations(avail, sizes[j]):
+            l2 = lab.copy(); l2[list(c)] = j; rec([a for a in avail if a not in c], j + 1, l2)
+    rec(list(range(n)), 0, np.full(n, -1)); return np.array(out), codes
 
 
 def fstat(x, lab):
-    ks = [k for k in range(3) if (lab == k).any()]; gm = x.mean()
-    ssb = sum((lab == k).sum() * (x[lab == k].mean() - gm) ** 2 for k in ks); ssw = sum(((x[lab == k] - x[lab == k].mean()) ** 2).sum() for k in ks)
-    return (ssb / (len(ks) - 1)) / (ssw / (len(x) - len(ks))) if ssw > 0 and len(x) > len(ks) else np.nan
+    ks = [j for j in range(len(GR)) if (lab == j).any()]; gm = x.mean()
+    ssb = sum((lab == j).sum() * (x[lab == j].mean() - gm) ** 2 for j in ks); ssw = sum(((x[lab == j] - x[lab == j].mean()) ** 2).sum() for j in ks)
+    return (ssb / (len(ks) - 1)) / (ssw / (len(x) - len(ks))) if ssw > 0 and len(x) > len(ks) and len(ks) > 1 else np.nan
 
 
 def welch(a, b):
@@ -167,7 +213,7 @@ def welch(a, b):
 
 
 def analyze(d):
-    out = []
+    out = []; ctl = GR[0]
     for turn in [None, "apex", "middle", "base"]:
         dd = d if turn is None else d[d.turn == turn]
         if not len(dd): continue
@@ -175,31 +221,31 @@ def analyze(d):
         mm = dd.groupby(["mouse", "group"]).res.mean().reset_index(); r = dict(turn=turn or "all turns", mice=len(mm))
         for g in GR: r[f"{g}_mean"] = dd[dd.group == g].groupby("mouse").value.mean().mean()
         A = None
-        if mm.group.nunique() == 3 and len(mm) > 3:
+        if mm.group.nunique() >= 2 and (mm.group == ctl).any() and len(mm) > mm.group.nunique():
             A, codes = assignments(mm.set_index("mouse").group); x = mm.res.values; f0 = fstat(x, codes)
-            if np.isfinite(f0): r["F"] = f0; r["P_three_group"] = float(np.mean(np.array([fstat(x, a) for a in A]) >= f0 - 1e-12))
-        for gi, (g, tag) in enumerate([("Smad3", "Smad3"), ("beta-catenin", "beta_catenin")], start=1):
-            sub = mm[mm.group.isin(["control", g])]
+            if np.isfinite(f0) and mm.group.nunique() >= 3: r["F"] = f0; r["P_three_group"] = float(np.mean(np.array([fstat(x, a) for a in A]) >= f0 - 1e-12))
+        for gi, g in enumerate(GR[1:], start=1):
+            sub = mm[mm.group.isin([ctl, g])]; t_ = tag(g)
             if sub.group.nunique() < 2: continue
             x = sub.res.values; k = (sub.group == g).values; obs = x[k].mean() - x[~k].mean()
             null2 = np.array([x[list(c)].mean() - np.delete(x, list(c)).mean() for c in combinations(range(len(x)), k.sum())])
             _, lo, hi = welch(x[~k], x[k])
-            r.update({f"{tag}_difference": obs, f"{tag}_ci_low": lo, f"{tag}_ci_high": hi, f"{tag}_P_two_groups_only": float(np.mean(np.abs(null2) >= abs(obs) - 1e-12))})
+            r.update({f"{t_}_difference": obs, f"{t_}_ci_low": lo, f"{t_}_ci_high": hi, f"{t_}_P_two_groups_only": float(np.mean(np.abs(null2) >= abs(obs) - 1e-12))})
             if A is not None:                 # P with group labels reassigned across all mice (as in build_feature_table)
                 xa = mm.res.values; nul = np.array([xa[a == gi].mean() - xa[a == 0].mean() for a in A])
-                r[f"{tag}_P"] = float(np.mean(np.abs(nul) >= abs(obs) - 1e-12))
+                r[f"{t_}_P"] = float(np.mean(np.abs(nul) >= abs(obs) - 1e-12))
             else:
-                r[f"{tag}_P"] = r[f"{tag}_P_two_groups_only"]
+                r[f"{t_}_P"] = r[f"{t_}_P_two_groups_only"]
         out.append(r)
     mg = d.groupby("mouse").group.first()
-    if mg.nunique() == 3 and d.turn.nunique() == 3:
-        A, codes = assignments(mg); mi = d.mouse.map({m: i for i, m in enumerate(mg.index)}).values
+    if mg.nunique() >= 2 and d.turn.nunique() >= 2 and (mg == ctl).any():
+        A, codes = assignments(mg); mi = d.mouse.map({m: i for i, m in enumerate(mg.index)}).values; kk = len(GR)
         T = pd.get_dummies(d.turn).values.astype(float); y = d.value.values
         def intF(lab):
-            G = np.eye(3)[lab[mi]]; X0 = np.c_[T, G[:, 1:]]; X1 = np.c_[X0, (T[:, 1:, None] * G[:, None, 1:]).reshape(len(y), -1)]
+            G = np.eye(kk)[lab[mi]]; X0 = np.c_[T, G[:, 1:]]; X1 = np.c_[X0, (T[:, 1:, None] * G[:, None, 1:]).reshape(len(y), -1)]
             r0 = y - X0 @ np.linalg.lstsq(X0, y, rcond=None)[0]; r1 = y - X1 @ np.linalg.lstsq(X1, y, rcond=None)[0]
-            df2 = len(y) - np.linalg.matrix_rank(X1)
-            return ((r0 @ r0 - r1 @ r1) / (X1.shape[1] - X0.shape[1])) / ((r1 @ r1) / df2) if df2 > 0 and r1 @ r1 > 0 else np.nan
+            df1 = np.linalg.matrix_rank(X1) - np.linalg.matrix_rank(X0); df2 = len(y) - np.linalg.matrix_rank(X1)
+            return ((r0 @ r0 - r1 @ r1) / df1) / ((r1 @ r1) / df2) if df1 > 0 and df2 > 0 and r1 @ r1 > 0 else np.nan
         f0 = intF(codes)
         if np.isfinite(f0): out[0]["P_genotype_by_turn"] = float(np.mean(np.array([intF(a) for a in A]) >= f0 - 1e-12))
     return out
@@ -217,23 +263,26 @@ def multivariate(LONG, ROB, FT):
     for ct in TYPES:
         rob = ROB[(ROB.cell_type == ct) & (ROB.status == "robust")].measure
         W = LONG[(LONG.family == "bundle panel: median") & (LONG.cell_type == ct) & LONG.measure.isin(rob)].pivot_table(index="field", columns="measure", values="value")
+        if W.empty: continue
         W = W.loc[:, W.std() > 0]; W = W - W.groupby(W.index.map(FT.turn)).transform("mean"); Z = (W - W.mean()) / W.std()
         Mm = Z.groupby(Z.index.map(FT.mouse)).mean().dropna(axis=1); grp = pd.Series([FT[FT.mouse == m].group.iloc[0] for m in Mm.index], index=Mm.index)
-        D2 = ((Mm.values[:, None, :] - Mm.values[None, :, :]) ** 2).sum(-1); n = len(Mm)
+        D2 = ((Mm.values[:, None, :] - Mm.values[None, :, :]) ** 2).sum(-1); n = len(Mm); kk = len(GR)
         def pf(lab):
-            sst = D2.sum() / (2 * n); ssw = sum(D2[np.ix_(lab == k, lab == k)].sum() / (2 * (lab == k).sum()) for k in range(3)); return ((sst - ssw) / 2) / (ssw / (n - 3))
+            sst = D2.sum() / (2 * n); ssw = sum(D2[np.ix_(lab == j, lab == j)].sum() / (2 * (lab == j).sum()) for j in range(kk) if (lab == j).any())
+            return ((sst - ssw) / (kk - 1)) / (ssw / (n - kk))
         A, codes = assignments(grp); f0 = pf(codes); r = dict(cell_type=ct, measures=Mm.shape[1], mice=n, pseudoF=f0, P_three_group=float(np.mean(np.array([pf(a) for a in A]) >= f0 - 1e-12)))
-        for g in ["Smad3", "beta-catenin"]:
-            sub = Mm[grp.isin(["control", g])]; k = (grp[sub.index] == g).values; obs = np.linalg.norm(sub.values[k].mean(0) - sub.values[~k].mean(0))
+        for g in GR[1:]:
+            sub = Mm[grp.isin([GR[0], g])]; k = (grp[sub.index] == g).values; obs = np.linalg.norm(sub.values[k].mean(0) - sub.values[~k].mean(0))
             null = [np.linalg.norm(sub.values[list(c)].mean(0) - np.delete(sub.values, list(c), 0).mean(0)) for c in combinations(range(len(sub)), k.sum())]
             r[f"P_{g}_vs_control"] = float(np.mean(np.array(null) >= obs - 1e-12))
         mv.append(r)
-        X = Z.fillna(0).values; X = X - X.mean(0); U, s, Vt = np.linalg.svd(X, full_matrices=False); ev = s ** 2 / (s ** 2).sum()
-        pc1 = pd.Series(U[:, 0] * s[0], index=Z.index); load = pd.Series(Vt[0], index=Z.columns).sort_values()
+        X = Z.fillna(0).values; X = X - X.mean(0); U, s_, Vt = np.linalg.svd(X, full_matrices=False); ev = s_ ** 2 / (s_ ** 2).sum()
+        pc1 = pd.Series(U[:, 0] * s_[0], index=Z.index); load = pd.Series(Vt[0], index=Z.columns).sort_values()
         bym = pc1.groupby(pc1.index.map(FT.mouse)).mean(); byg = bym.groupby([FT[FT.mouse == m].group.iloc[0] for m in bym.index]).mean()
-        pcs.append(dict(cell_type=ct, PC1_share=ev[0], PC2_share=ev[1], PC1_lowest_loadings=", ".join(load.index[:4]), PC1_highest_loadings=", ".join(load.index[-4:]), **{f"PC1_{g}": byg.get(g) for g in GR}))
+        pcs.append(dict(cell_type=ct, PC1_share=ev[0], PC2_share=ev[1] if len(ev) > 1 else np.nan, PC1_lowest_loadings=", ".join(load.index[:4]),
+                        PC1_highest_loadings=", ".join(load.index[-4:]), **{f"PC1_{g}": byg.get(g) for g in GR}))
         Cm = W.corr(method="spearman").abs().fillna(0); Dc = 1 - Cm.values; np.fill_diagonal(Dc, 0)
-        cl = fcluster(linkage(squareform(Dc, checks=False), "average"), t=0.2, criterion="distance")
+        cl = fcluster(linkage(squareform(Dc, checks=False), "average"), t=0.2, criterion="distance") if len(Cm) > 1 else [1]
         fams += [dict(cell_type=ct, measure=m, related_measure_group=int(c)) for m, c in zip(Cm.columns, cl)]
     return pd.DataFrame(mv), pd.DataFrame(pcs), pd.DataFrame(fams)
 
@@ -241,44 +290,76 @@ def multivariate(LONG, ROB, FT):
 def bundle_models(B, ROB):
     import statsmodels.formula.api as smf
     warnings.filterwarnings("ignore"); out = []
-    fml = 'y ~ C(genotype, Treatment("control")) + C(turn)'; kS = 'C(genotype, Treatment("control"))[T.Smad3]'; kB = 'C(genotype, Treatment("control"))[T.beta-catenin]'
+    fml = f'y ~ C(genotype, Treatment("{GR[0]}")) + C(turn)'
     for ct in TYPES:
         for m in ROB[(ROB.cell_type == ct) & (ROB.status == "robust")].measure:
             d = B[B.row == ct][[m, "group", "turn", "mouse", "field"]].dropna().rename(columns={m: "y", "group": "genotype"})
-            if d.y.std() == 0: continue
+            if d.y.std() == 0 or d.genotype.nunique() < 2: continue
             d["y"] = (d.y - d.y.mean()) / d.y.std()
             try:
                 fit = smf.mixedlm(fml, d, groups="mouse", re_formula="1", vc_formula={"field": "0 + C(field)"}).fit(reml=True)
                 vm, vf, ve = float(fit.cov_re.iloc[0, 0]), float(fit.vcomp[0]), float(fit.scale); tot = vm + vf + ve
-                out.append(dict(cell_type=ct, measure=m, bundles=len(d), Smad3_sd_units=fit.params[kS], Smad3_P_model=fit.pvalues[kS], beta_catenin_sd_units=fit.params[kB],
-                                beta_catenin_P_model=fit.pvalues[kB], share_mouse=vm / tot, share_field=vf / tot, share_bundle=ve / tot, converged=fit.converged, singular=vm < 1e-4))
+                r = dict(cell_type=ct, measure=m, bundles=len(d), share_mouse=vm / tot, share_field=vf / tot, share_bundle=ve / tot, converged=fit.converged, singular=vm < 1e-4)
+                for g in GR[1:]:
+                    key = f'C(genotype, Treatment("{GR[0]}"))[T.{g}]'
+                    r[f"{tag(g)}_sd_units"] = fit.params.get(key); r[f"{tag(g)}_P_model"] = fit.pvalues.get(key)
+                out.append(r)
             except Exception as ex:
                 out.append(dict(cell_type=ct, measure=m, error=str(ex)[:120]))
     return pd.DataFrame(out)
 
 
-def main():
-    FT = field_info()
+FIELD_SETS = [("flagged fields left out", True), ("all fields", False)]
+
+
+def main(argv=None):
+    global GR
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--groups", help="table with columns mouse, group: genotype per mouse, replacing the settings (statistics only)")
+    ap.add_argument("--control", help="name of the control group (default: CONTROL_GROUP from the settings, else 'control')")
+    a = ap.parse_args(argv)
+    groups_csv = a.groups or (os.path.join(R, "groups.csv") if os.path.exists(os.path.join(R, "groups.csv")) else None)
+    FT = field_info(groups_csv); field_index(FT).to_csv(os.path.join(R, "fields_index.csv"), index=False)
+    control = a.control or getattr(S, "CONTROL_GROUP", "") or "control"
+    present = [g for g in FT.group.dropna().unique() if str(g) != ""]
+    GR = ([control] if control in present else []) + sorted(g for g in present if g != control)
     LONG, PH, B, MEAS = long_table(FT); LONG.to_csv(os.path.join(R, "phenotype_field_values_long.csv"), index=False)
     ROB = robustness(PH, FT, MEAS); ROB.to_csv(os.path.join(R, "bundle_phenotype_robustness.csv"), index=False)
-    res = []
-    for (fam, ct, m), d in LONG.groupby(["family", "cell_type", "measure"]):
-        tested = d.value.nunique() > 2 and d.value.std() > 1e-9
-        if d.mouse.nunique() < 6: continue
-        for r in (analyze(d) if tested else [dict(turn="all turns")]): r.update(family=fam, cell_type=ct, measure=m, tested=tested); res.append(r)
-    T = pd.DataFrame(res); a = T.turn == "all turns"
-    for col in ["P_three_group", "Smad3_P", "beta_catenin_P", "P_genotype_by_turn"]:
-        T[col + "_adj"] = np.nan
-        for _, idx in T[a].groupby(["family", "cell_type"]).groups.items(): T.loc[idx, col + "_adj"] = bh(T.loc[idx, col].values)
-    MV, PCS, FAM = multivariate(LONG, ROB, FT)
-    T = T.merge(FAM, on=["cell_type", "measure"], how="left").merge(ROB[["cell_type", "measure", "status", "min_spearman", "field_icc"]].rename(columns={"status": "robustness"}), on=["cell_type", "measure"], how="left")
-    T.to_csv(os.path.join(R, "phenotype_statistics_all.csv"), index=False)
-    MV.to_csv(os.path.join(R, "phenotype_panel_multivariate.csv"), index=False); PCS.to_csv(os.path.join(R, "phenotype_panel_principal_components.csv"), index=False)
-    MX = bundle_models(B, ROB); MX.to_csv(os.path.join(R, "phenotype_bundle_level_models.csv"), index=False)
-    n = T[a & T.tested].P_three_group.notna().sum()
-    print(f"phenotypes tested {n}; three-group P < 0.05: {(T[a].P_three_group < 0.05).sum()}; smallest adjusted {T[a].P_three_group_adj.min():.3f}")
+    if control not in present or len(GR) < 2 or FT[FT.group.isin(GR)].groupby("group").mouse.nunique().min() < 2:
+        msg = (f"group tests not run: need the control group {control!r} and at least one other group with 2 or more mice each "
+               f"(groups found: {', '.join(map(str, present)) or 'none'}); the field tables are written. Add a groups table and run:  "
+               f"python phenotype_statistics.py --groups <table with columns mouse, group>")
+        print(msg); open(os.path.join(R, "phenotype_statistics_note.txt"), "w", encoding="utf-8").write(msg + "\n"); return None
+    print("groups:", ", ".join(f"{g} ({FT[FT.group == g].mouse.nunique()} mice)" for g in GR), "| control:", GR[0])
+    allT, allMV, allPC, allMX = [], [], [], []
+    for label, drop in FIELD_SETS:
+        L_ = LONG[LONG.group.isin(GR) & ~(LONG.flagged & drop)]
+        B_ = B[B.group.isin(GR) & ~(B.flagged & drop)]
+        FT_ = FT[FT.group.isin(GR) & ~(FT.damaged & drop)]
+        res = []
+        for (fam, ct, m), d in L_.groupby(["family", "cell_type", "measure"]):
+            tested = d.value.nunique() > 2 and d.value.std() > 1e-9
+            if d.mouse.nunique() < 3: continue
+            for r in (analyze(d) if tested else [dict(turn="all turns")]): r.update(family=fam, cell_type=ct, measure=m, tested=tested); res.append(r)
+        T = pd.DataFrame(res); a_ = T.turn == "all turns"
+        pcols = [c for c in T.columns if c == "P_three_group" or c == "P_genotype_by_turn" or (c.endswith("_P") and not c.endswith("two_groups_only_P"))]
+        for col in pcols:
+            T[col + "_adj"] = np.nan
+            for _, idx in T[a_].groupby(["family", "cell_type"]).groups.items(): T.loc[idx, col + "_adj"] = bh(T.loc[idx, col].values)
+        MV, PCS, FAM = multivariate(L_, ROB, FT_)
+        T = T.merge(FAM, on=["cell_type", "measure"], how="left").merge(ROB[["cell_type", "measure", "status", "min_spearman", "field_icc"]].rename(columns={"status": "robustness"}), on=["cell_type", "measure"], how="left")
+        T.insert(0, "fields", label); MV.insert(0, "fields", label); PCS.insert(0, "fields", label)
+        MX = bundle_models(B_, ROB); MX.insert(0, "fields", label)
+        allT.append(T); allMV.append(MV); allPC.append(PCS); allMX.append(MX)
+        n = T[a_ & T.tested].P_three_group.notna().sum() if "P_three_group" in T else 0
+        print(f"{label}: phenotypes tested {n}; three-group P < 0.05: {(T[a_].get('P_three_group', pd.Series(dtype=float)) < 0.05).sum()}; "
+              f"smallest adjusted {T[a_].get('P_three_group_adj', pd.Series([np.nan])).min():.3f}")
+    T = pd.concat(allT, ignore_index=True); MV = pd.concat(allMV, ignore_index=True)
+    T.to_csv(os.path.join(R, "phenotype_statistics_all.csv"), index=False); MV.to_csv(os.path.join(R, "phenotype_panel_multivariate.csv"), index=False)
+    pd.concat(allPC, ignore_index=True).to_csv(os.path.join(R, "phenotype_panel_principal_components.csv"), index=False)
+    pd.concat(allMX, ignore_index=True).to_csv(os.path.join(R, "phenotype_bundle_level_models.csv"), index=False)
     print(MV.round(4).to_string(index=False))
-    return T, MV, PCS, MX
+    return T, MV
 
 
 if __name__ == "__main__":

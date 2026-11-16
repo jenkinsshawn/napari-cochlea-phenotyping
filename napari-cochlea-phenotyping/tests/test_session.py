@@ -106,3 +106,22 @@ def test_version_1_settings_still_load(tmp_path):
                                  bundle_side=-1, confirmed_by="x", confirmed_on="", plugin_version="0.1.0", device={},
                                  notes="", settings_version=1)))
     s = DatasetSettings.load(str(p)); assert s.stains_for("any field", ["DAPI", "Cy5"]) == ["DAPI", "Phalloidin"]
+
+
+def test_panel_without_phalloidin_is_set_aside(tmp_path):
+    write(str(tmp_path / "AR1 Calb2 Phall BASE.ome.tif"))
+    write(str(tmp_path / "AR9 Prestin Calb2 CtBP2 BASE.ome.tif"), c=4, names=["EGFP", "TRITC", "Cy5", "DAPI"])
+    s = StandardizeSession(); s.add_paths([str(tmp_path)])
+    s.confirm_stains()                                          # the Prestin panel has unnamed channels but no phalloidin
+    assert s.stains_confirmed and s.set_aside() == {"AR9 Prestin Calb2 CtBP2 BASE": "not measured: no phalloidin channel"}
+
+
+def test_groups_table_loaded_and_saved(tmp_path):
+    write(str(tmp_path / "AR1 Calb2 Phall BASE.ome.tif")); write(str(tmp_path / "AR2 Calb2 Phall APEX.ome.tif"))
+    s = StandardizeSession(); s.add_paths([str(tmp_path)])
+    (tmp_path / "g.csv").write_text("mouse,group\nAR1,control\nAR2,mutant\nAR7,mutant\n")
+    assert s.load_groups(str(tmp_path / "g.csv")) == ["AR7"] and s.group_of_mouse == {"AR1": "control", "AR2": "mutant"}
+    s.control_group = "control"; s.confirm_stains(); s.set_bundle_side(-1)
+    paths = s.save(str(tmp_path / "results"))
+    import pandas as pd
+    assert pd.read_csv([p for p in paths if p.endswith("groups.csv")][0]).group.tolist() == ["control", "mutant"]

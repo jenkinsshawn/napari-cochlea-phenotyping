@@ -109,11 +109,25 @@ class StandardizeSession:
         return [p for p in self.panels() if "Phalloidin" not in {s for (q, _), s in self.stains.items() if q == p}]
 
     def confirm_stains(self):
+        """Accept the stain table. Only panels that will be measured need every channel named: a panel without a
+        phalloidin channel cannot be measured, so its images are set aside with that reason instead of blocking, and
+        images whose scale differs from the dataset's are set aside the same way (16 Nov 2026)."""
         if not any(s == "Phalloidin" for s in self.stains.values()):
             raise ValueError("set the phalloidin channel before confirming")
-        if any(s == "to check" for s in self.stains.values()):
-            raise ValueError("every channel needs a stain (choose 'other' for a channel you will not use)")
+        unmeasured = set(self.panels_without_phalloidin())
+        todo = sorted({f"{ch} in {p}" for (p, ch), s in self.stains.items() if s == "to check" and p not in unmeasured})
+        if todo:
+            raise ValueError("name the stain of " + "; ".join(todo) + " (choose 'other' for a channel you will not use)")
+        for p in unmeasured:
+            for f in self.panels().get(p, []):
+                self.excluded.setdefault(f, "not measured: no phalloidin channel")
+        for f in self.fields_off_scale():
+            self.excluded.setdefault(f, "not measured: image scale differs from the dataset")
         self.stains_confirmed = True
+
+    def set_aside(self) -> Dict[str, str]:
+        """Images that will not be measured, with the reason."""
+        return {f: r for f, r in self.excluded.items() if r.startswith("not measured")}
 
     def set_mouse(self, field: str, mouse: str):
         self.mouse_of[field] = mouse.strip(); self.group_of_mouse.setdefault(mouse.strip(), "")
@@ -188,7 +202,22 @@ class StandardizeSession:
         os.makedirs(folder, exist_ok=True)
         s = self.settings(confirmed_by, device); p1 = os.path.join(folder, "dataset_settings.json"); s.save(p1)
         p2 = os.path.join(folder, "standardize_qc.csv"); pd.DataFrame(self.qc_rows()).to_csv(p2, index=False)
-        return [p1, p2]
+        # genotype per mouse as a plain table: edit it (or replace it) and rerun only the statistics step
+        p3 = os.path.join(folder, "groups.csv")
+        pd.DataFrame(sorted(self.group_of_mouse.items()), columns=["mouse", "group"]).to_csv(p3, index=False)
+        return [p1, p2, p3]
+
+    def load_groups(self, path: str) -> List[str]:
+        """Genotype per mouse from a table with columns mouse, group (CSV, or tab-separated text). Returns the mice in
+        the table that are not among the images."""
+        import pandas as pd
+        t = pd.read_csv(path, sep=None, engine="python", dtype=str).fillna("")
+        unknown = []
+        for m, g in zip(t.iloc[:, 0].str.strip(), t.iloc[:, 1].str.strip()):
+            if m in self.group_of_mouse: self.group_of_mouse[m] = g
+            else: unknown.append(m)
+        self.stains_confirmed = self.stains_confirmed            # groups do not change the stain table
+        return unknown
 
 
 def guess_mouse(field: str) -> str:

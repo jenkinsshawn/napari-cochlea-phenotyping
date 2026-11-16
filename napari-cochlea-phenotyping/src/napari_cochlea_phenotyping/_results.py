@@ -47,6 +47,12 @@ TABLES = {   # results files shown in the tab: label -> file name in the results
     "outer hair cell bundles": "ohc_bundles_v2_cells.csv", "row 1 bundle heights": "ohc1_bundle_height_cells.csv",
     "inner hair cell nuclei": "ihc_nuclei_cells.csv", "validation cards": "validation_cards.csv",
     "imaging settings": "imaging_settings_by_field.csv",
+    "every image (mouse, genotype, flags)": "fields_index.csv",
+    "phenotype statistics (all measures, all turns and each turn)": "phenotype_statistics_all.csv",
+    "whole-panel tests": "phenotype_panel_multivariate.csv", "principal components": "phenotype_panel_principal_components.csv",
+    "bundle measures per bundle": "bundle_phenotypes_cells.csv", "bundle measure robustness": "bundle_phenotype_robustness.csv",
+    "hair cell surface and bundle direction per cell": "hair_cell_surface_polarity_cells.csv",
+    "field values of every measure": "phenotype_field_values_long.csv",
 }
 
 

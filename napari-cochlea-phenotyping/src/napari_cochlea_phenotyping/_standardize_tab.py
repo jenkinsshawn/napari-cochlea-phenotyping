@@ -50,6 +50,8 @@ class StandardizeTab(QWidget):
         self.mouse_table.itemChanged.connect(self._group_edited)
         gl.addWidget(QLabel("Group of each mouse (mouse read from the start of the file name; leave the group empty to\n"
                             "measure a mouse without comparing it):")); gl.addWidget(self.mouse_table)
+        lg = QHBoxLayout(); self.groups_btn = QPushButton("Load genotype table (mouse, group)...")
+        self.groups_btn.clicked.connect(lambda: self.load_groups()); lg.addWidget(self.groups_btn); lg.addStretch(1); gl.addLayout(lg)
         row = QHBoxLayout(); row.addWidget(QLabel("Control group:")); self.control_cb = QComboBox()
         self.control_cb.currentTextChanged.connect(self._control_edited); row.addWidget(self.control_cb, 1); gl.addLayout(row)
 
@@ -198,6 +200,20 @@ class StandardizeTab(QWidget):
         if not s.control_group and len(s.groups()) > 1:
             extra += f". <span style='color:{WARN}'>No control group chosen: groups will be described but not compared</span>"
         self._show_status(extra); return p
+
+    def load_groups(self, path: Optional[str] = None) -> bool:
+        """Fill the group column from a table (columns mouse, group)."""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Genotype table", "", "Tables (*.csv *.tsv *.txt)")
+            if not path: return False
+        try:
+            unknown = self.session.load_groups(path)
+        except Exception as e:
+            self.status.setText(f"<span style='color:{WARN}'>Could not read {os.path.basename(path)}: {e}</span>"); return False
+        self._fill_mouse_table(); self._fill_control(); self._show_status()
+        if unknown:
+            self.status.setText(self.status.text() + f"<br><span style='color:{WARN}'>Not among the images: {', '.join(unknown)}</span>")
+        return True
 
     def selected_field(self) -> Optional[str]:
         rows = [i.row() for i in self.images.selectedIndexes()]; names = sorted(self.session.infos)
