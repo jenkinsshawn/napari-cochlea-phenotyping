@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "napari-cochlea-phenotyping"
+version = "0.1.0"
+description = "Measure hair cells, stereocilia bundles and nuclei in confocal images of the cochlea, step by step in napari"
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+requires-python = ">=3.9"
+dependencies = ["napari", "magicgui", "qtpy", "numpy", "pandas", "scipy", "tifffile", "psutil"]
+classifiers = ["Framework :: napari", "Programming Language :: Python :: 3", "License :: OSI Approved :: BSD License"]
+
+[project.optional-dependencies]
+models = ["torch", "cellpose"]
+nd2 = ["nd2"]
+testing = ["pytest"]
+# everything the measurement pipeline (Measure tab) imports
+pipeline = ["nd2", "scikit-image", "scikit-learn", "statsmodels", "joblib", "matplotlib", "torch", "cellpose"]
+
+[project.entry-points."napari.manifest"]
+napari-cochlea-phenotyping = "napari_cochlea_phenotyping:napari.yaml"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+napari_cochlea_phenotyping = ["napari.yaml"]

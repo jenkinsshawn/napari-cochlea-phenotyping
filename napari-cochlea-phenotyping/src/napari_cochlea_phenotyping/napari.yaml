@@ -1,0 +1,10 @@
+name: napari-cochlea-phenotyping
+display_name: Cochlea Phenotyping
+contributions:
+  commands:
+    - id: napari-cochlea-phenotyping.widget
+      python_name: napari_cochlea_phenotyping._widget:CochleaPhenotyping
+      title: Cochlea Phenotyping
+  widgets:
+    - command: napari-cochlea-phenotyping.widget
+      display_name: Cochlea Phenotyping

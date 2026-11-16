@@ -1,0 +1,13 @@
+__pycache__/
+*.egg-info/
+*.pyc
+.pytest_cache/
+.Rhistory
+# images and model files stay out of the repository
+*.nd2
+*.czi
+*.lif
+*.tif
+*.tiff
+*.npz
+*.pth
