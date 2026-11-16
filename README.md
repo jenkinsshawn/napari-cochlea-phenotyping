@@ -11,7 +11,7 @@ as a napari plugin (Plugins > Cochlea Phenotyping) and the pipeline scripts it r
   hand references).
 
 The trained models (bundle detector, hair cell and row classifiers, inner hair cell bundle classifier, pillar detector)
-are attached to each release as `models.zip`; unzip them into the folder named by `MODELS` in `pipeline_settings.py`.
+and the validation reference are in `models/`; copy them into the folder named by `MODELS` in `pipeline_settings.py`.
 
 ## Install
 
