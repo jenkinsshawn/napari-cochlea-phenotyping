@@ -194,8 +194,7 @@ def long_table(FT):
         add(allf, "cell_type", "spatial: orientation and clustering (not validated)",
             [c for c in ["local_misorient_median_deg", "orientation_corr_length_um"] + [f"flag_{fl}_{k}" for fl in ["misoriented", "shape", "no_bundle", "any"] for k in ("share", "ratio")] if c in allf])
     # inner hair cell bundle height pooled per mouse: every standing, complete bundle with its outline on the bundle side
-    # counts once (rows are bundles); a mouse with fewer than IHC_POOLED_MIN bundles is not assessed. Field medians rest
-    # on 0-13 such bundles and did not reproduce between full reruns (17 Nov 2026); pooling makes each bundle count once.
+    # counts once (rows are bundles); a mouse with fewer than IHC_POOLED_MIN bundles is not assessed.
     try:
         import build_feature_table as bft
         ist2 = pd.read_csv(os.path.join(R, "ihc_stereocilia_cells_v2.csv")); pb = []

@@ -1,35 +1,22 @@
 # Cochlea Phenotyping
 
-Automatic measurement of hair cells and stereocilia bundles in confocal images of mouse cochlear whole mounts,
-as a napari plugin (Plugins > Cochlea Phenotyping) and the pipeline scripts it runs.
+Automatic measurement of hair cells and stereocilia bundles in confocal images of mouse cochlear whole mounts, as a
+napari plugin.
 
-## Layout
+## Install (Windows)
 
-- `napari-cochlea-phenotyping/`: the napari plugin (Standardize, Cells, Measure and Results tabs) and its tests.
-- `stereocilia/scripts/`: the pipeline steps the Measure tab runs (`run_pipeline.py` runs them in order;
-  `pipeline_settings.py` holds the folders, image scale and mouse table; `run_checks.py` compares the outputs with the
-  hand references).
-
-The trained models (bundle detector, hair cell and row classifiers, inner hair cell bundle classifier, pillar detector)
-and the validation reference are in `models/`; copy them into the folder named by `MODELS` in `pipeline_settings.py`.
-
-## Install
+Download this repository (Code > Download ZIP), unzip it, type `powershell` in the File Explorer address bar of the
+unzipped folder and run:
 
 ```
-conda activate imaging
-cd napari-cochlea-phenotyping
-pip install -e ".[pipeline]"
-napari
+powershell -ExecutionPolicy Bypass -File .\install_cochlea_phenotyping.ps1
 ```
 
-The plugin finds the pipeline scripts in `stereocilia/scripts` beside its own folder, or in the folder named by the
-environment variable `COCHLEA_PIPELINE_SCRIPTS`.
+Then open napari from the **Cochlea Phenotyping** shortcut on the Desktop. See
+`napari-cochlea-phenotyping/Cochlea_Phenotyping_user_guide.docx` for a step-by-step guide.
 
-## Run the pipeline without napari
+## Contents
 
-```
-conda activate imaging
-cd stereocilia/scripts
-python run_pipeline.py --settings <your settings file>
-python run_checks.py
-```
+- `napari-cochlea-phenotyping/`: the napari plugin and its tests.
+- `stereocilia/scripts/`: the measurement steps the plugin runs (`run_pipeline.py` runs them in order).
+- `models/`: the trained models.
