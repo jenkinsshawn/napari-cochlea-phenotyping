@@ -10,7 +10,7 @@
 #   1. Uses an existing Miniforge or Anaconda install, or installs Miniforge for this user only.
 #   2. Creates the environment "cochlea-phenotyping" (Python 3.12) and installs napari, the plugin and everything the
 #      pipeline imports with pip. scikit-learn is held at the version the trained models were saved with.
-#      If an NVIDIA graphics card is found, PyTorch is replaced by its graphics card build (CUDA 12.8).
+#      If an NVIDIA graphics card is found, PyTorch is installed first from the PyTorch site with graphics card support.
 #   3. Tells the plugin where the pipeline scripts and trained models are (COCHLEA_PIPELINE_SCRIPTS and
 #      COCHLEA_PIPELINE_MODELS, set inside the Desktop shortcuts only, so other napari installs are not affected), downloads the Cellpose-SAM model (about 1.2 GB),
 #      loads every trained model once and runs the plugin's own tests.
@@ -93,13 +93,29 @@ if ($exists -and $Rebuild) {
 if (-not $exists) { Run $Conda @("create", "-y", "-n", $EnvName, "python=3.12", "pip", "-c", "conda-forge") }
 UseEnvPath
 Pip @("install", "--upgrade", "pip")
+
+# PyTorch with graphics card support comes from the PyTorch site, not PyPI (PyPI's Windows build is processor-only).
+# It goes in first so the packages installed after it keep it. The newest CUDA build available is used; every one of
+# these covers recent NVIDIA cards, including Blackwell.
+function CudaTorchWorks { $r = (& $Py -c "import torch; print(torch.cuda.is_available())" 2>$null); return ($LASTEXITCODE -eq 0 -and "$r".Trim() -eq "True") }
+function InstallCudaTorch([switch]$NoDeps) {
+    foreach ($cu in @("cu132", "cu131", "cu130", "cu129", "cu128")) {
+        $a = @("-m", "pip", "install", "--force-reinstall", "torch", "torchvision", "--index-url", "https://download.pytorch.org/whl/$cu")
+        if ($NoDeps) { $a += "--no-deps" } else { $a += @("--extra-index-url", "https://pypi.org/simple") }
+        Write-Host "Trying the PyTorch build for $cu"
+        & $Py @a
+        if ($LASTEXITCODE -eq 0 -and (CudaTorchWorks)) { Write-Host "PyTorch uses the NVIDIA graphics card ($cu)." -ForegroundColor Green; return $true }
+    }
+    return $false
+}
+if ($nvidia.Count -gt 0 -and -not (CudaTorchWorks)) {
+    if (-not (InstallCudaTorch)) { Write-Host "Could not install PyTorch with graphics card support; the pipeline will run on the processor." -ForegroundColor Yellow }
+}
 Pip @("install", "napari[all]", "scikit-learn==$SklearnVersion", "pytest")
 Pip @("install", "-e", ($PluginDir + "[pipeline]"))
-if ($nvidia.Count -gt 0) {
-    # PyPI's PyTorch is processor-only on Windows; the graphics card build replaces it at the same version.
-    # CUDA 12.8 builds also cover the newest (Blackwell) NVIDIA cards.
-    $tv = (& $Py -c "import importlib.metadata as m; print(m.version('torch').split('+')[0] + ' ' + m.version('torchvision').split('+')[0])").Trim().Split(" ")
-    Pip @("install", "--force-reinstall", "--no-deps", "torch==$($tv[0])", "torchvision==$($tv[1])", "--index-url", "https://download.pytorch.org/whl/cu128")
+if ($nvidia.Count -gt 0 -and -not (CudaTorchWorks)) {
+    # a package above replaced PyTorch with the processor-only build; put the graphics card build back
+    if (-not (InstallCudaTorch -NoDeps)) { Write-Host "PyTorch cannot use the NVIDIA graphics card; the pipeline will run on the processor." -ForegroundColor Yellow }
 }
 
 # ---------------------------------------------------------------- 3. folders, models, checks
