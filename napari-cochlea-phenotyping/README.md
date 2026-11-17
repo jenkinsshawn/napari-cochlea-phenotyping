@@ -30,13 +30,21 @@ are measured by the Measure tab and shown in the Results tab.
 
 ## Install
 
+Download the repository (Code > Download ZIP) and unzip it. In the unzipped folder, open PowerShell (type
+`powershell` in the File Explorer address bar) and run:
+
 ```
-conda activate imaging
-pip install -e "C:\path\to\napari-cochlea-phenotyping[pipeline]"
-napari
+powershell -ExecutionPolicy Bypass -File .\install_cochlea_phenotyping.ps1
 ```
 
-Then open **Plugins > Cochlea Phenotyping**.
+The installer uses an existing Miniforge or Anaconda (or installs Miniforge for the user, no administrator rights),
+builds the environment `cochlea-phenotyping`, installs the graphics card build of PyTorch when an NVIDIA card is found,
+points the plugin at the pipeline scripts and trained models in the download, loads every model once and runs the
+plugin's tests. It puts a **Cochlea Phenotyping** shortcut on the Desktop that opens napari with the panel. The step by
+step guide for users is `Cochlea_Phenotyping_user_guide.docx`.
+
+To change the groups after a run, press **Redo statistics with a genotype table...** in the Results tab and choose a
+CSV with columns `mouse, group`; the statistics are recomputed without measuring again.
 
 ## Graphics card
 

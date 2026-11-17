@@ -8,7 +8,8 @@ from typing import Callable, Optional
 
 from qtpy.QtCore import Qt, QUrl
 from qtpy.QtGui import QColor, QDesktopServices
-from qtpy.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QPushButton,
+from qtpy.QtCore import QProcess, QProcessEnvironment
+from qtpy.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton,
                             QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ._results import LEVEL_COLORS, LEVELS, TABLES, Results, open_results
@@ -61,6 +62,10 @@ class ResultsTab(QWidget):
         self.table_btn.clicked.connect(lambda: self.open_table()); t.addWidget(self.table_box, 1); t.addWidget(self.table_btn); lay.addLayout(t)
         self.layers_btn = QPushButton("Show measured cells on the selected image"); self.layers_btn.clicked.connect(lambda: self.show_layers())
         lay.addWidget(self.layers_btn)
+        self.redo_btn = QPushButton("Redo statistics with a genotype table...")
+        self.redo_btn.setToolTip("Recompute every group test of this run from a table with columns mouse, group, without measuring again")
+        self.redo_btn.clicked.connect(lambda: self.redo_statistics()); lay.addWidget(self.redo_btn)
+        self._proc = None
 
     @staticmethod
     def _setup(t):
@@ -178,3 +183,43 @@ class ResultsTab(QWidget):
                 self.viewer.add_points(pts, name=f"{field} {name}", size=2.0, face_color="transparent", border_color=color,
                                        properties=props or None)
         return data
+
+    # redo statistics ---------------------------------------------------------------------------------------------
+    def redo_statistics(self, groups_csv: str = "", control: str = ""):
+        """Run phenotype_statistics.py on this results folder with another genotype table; reload when it finishes."""
+        from ._run import groups_in_table, redo_statistics_command
+        if self.results is None:
+            self.status.setText(f"<span style='color:{WARN}'>Open a results folder first.</span>"); return None
+        if not groups_csv:
+            groups_csv, _ = QFileDialog.getOpenFileName(self, "Genotype table (columns mouse, group)", self.results.folder, "Tables (*.csv)")
+            if not groups_csv: return None
+        groups = groups_in_table(groups_csv)
+        if not control:
+            if len(groups) < 2:
+                self.status.setText(f"<span style='color:{WARN}'>The table needs at least two groups; found {len(groups)}.</span>"); return None
+            start = groups.index("control") if "control" in groups else 0
+            control, ok = QInputDialog.getItem(self, "Control group", "Control group:", groups, start, False)
+            if not ok: return None
+        try:
+            argv, env = redo_statistics_command(self.results.folder, groups_csv, control)
+        except FileNotFoundError as e:
+            self.status.setText(f"<span style='color:{WARN}'>{e}</span>"); return None
+        pe = QProcessEnvironment()
+        for k, v in env.items(): pe.insert(k, v)
+        self._proc = QProcess(self); self._proc.setProcessEnvironment(pe); self._proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._proc.setWorkingDirectory(os.path.dirname(argv[1]))
+        folder = self.results.folder
+        self._proc.finished.connect(lambda code, _status: self._redo_done(code, folder))
+        self.redo_btn.setEnabled(False)
+        self.status.setText(f"Redoing the statistics with {os.path.basename(groups_csv)} (control: {control}); this takes a few minutes...")
+        self._proc.start(argv[0], argv[1:])
+        return argv
+
+    def _redo_done(self, code: int, folder: str):
+        out = bytes(self._proc.readAll()).decode("utf-8", "replace") if self._proc is not None else ""
+        with open(os.path.join(folder, "redo_statistics_log.txt"), "w", encoding="utf-8") as fh: fh.write(out)
+        self.redo_btn.setEnabled(True)
+        if code == 0:
+            self.load(folder); self.status.setText(self.status.text() + "<br>Statistics redone; tables updated (log: redo_statistics_log.txt).")
+        else:
+            self.status.setText(f"<span style='color:{WARN}'>The statistics stopped with an error; see redo_statistics_log.txt in the results folder.</span>")

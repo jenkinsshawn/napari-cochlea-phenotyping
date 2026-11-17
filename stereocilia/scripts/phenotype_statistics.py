@@ -45,7 +45,8 @@ from scipy.cluster.hierarchy import linkage, fcluster
 
 R = S.RESULTS; TYPES = ["IHC", "OHC1", "OHC2", "OHC3"]
 GR = []          # control first, then the other groups (set in main from the feature table and any --groups table)
-MAX_ARRANGEMENTS = 20000   # above this many relabelings, a random sample of this size is used (seed 1)
+MAX_ARRANGEMENTS = 20000
+IHC_POOLED_MIN = 10       # standing bundles a mouse needs for the pooled inner hair cell height   # above this many relabelings, a random sample of this size is used (seed 1)
 
 
 def tag(g):
@@ -174,6 +175,56 @@ def long_table(FT):
         for rw in ["OHC1", "OHC2", "OHC3"]:
             add(rf.rename(columns={rw: "per_100um"}).assign(cell_type=rw), "cell_type", "density (corrected hand reference)", ["per_100um"])
         add(rf.assign(cell_type="all"), "cell_type", "density (corrected hand reference)", ["outer_hair_cells_per_100um"])
+    # spatial organization (spatial_stats.py): per row and per field; within-field P values, counts and circular means
+    # are not used as phenotypes
+    sp = os.path.join(R, "spatial", "fields_spatial.csv")
+    if os.path.exists(sp):
+        FS = pd.read_csv(sp)
+        rows_sp = {"spacing and packing": ["spacing_cv", "regularity_index", "gaps", "doubles"],
+                   "orientation and clustering (not validated)": ["notch_R", "notch_circ_sd_deg", "notch_drift_deg_per_100um", "notch_share_pointing_inward", "axis_R", "axis_circ_sd_deg"]}
+        for fam, ms in rows_sp.items():
+            for rw in ["IHC", "OHC1", "OHC2", "OHC3"]:
+                cols = [f"{rw}_{m}" for m in ms if f"{rw}_{m}" in FS]
+                if cols: add(FS[["field"] + cols].assign(cell_type=rw).rename(columns={c: c[len(rw) + 1:] for c in cols}), "cell_type", "spatial: " + fam, [c[len(rw) + 1:] for c in cols])
+        allf = FS.assign(cell_type="all")
+        add(allf, "cell_type", "spatial: spacing and packing", [c for c in ["row_distance_IHC_OHC1_um", "row_distance_OHC1_OHC2_um", "row_distance_OHC2_OHC3_um",
+            "stagger_OHC2_vs_OHC1", "stagger_OHC3_vs_OHC2", "ohc_interior_share_6_neighbors"] if c in FS])
+        allf = pd.concat([allf.copy(), pd.DataFrame({f"flag_{fl}_share": FS[f"flag_{fl}_flagged"] / FS.hair_cells.where(FS.hair_cells > 0)
+                                       for fl in ["misoriented", "shape", "no_bundle", "any"] if f"flag_{fl}_flagged" in FS}, index=FS.index)], axis=1)
+        add(allf, "cell_type", "spatial: orientation and clustering (not validated)",
+            [c for c in ["local_misorient_median_deg", "orientation_corr_length_um"] + [f"flag_{fl}_{k}" for fl in ["misoriented", "shape", "no_bundle", "any"] for k in ("share", "ratio")] if c in allf])
+    # inner hair cell bundle height pooled per mouse: every standing, complete bundle with its outline on the bundle side
+    # counts once (rows are bundles); a mouse with fewer than IHC_POOLED_MIN bundles is not assessed. Field medians rest
+    # on 0-13 such bundles and did not reproduce between full reruns (17 Nov 2026); pooling makes each bundle count once.
+    try:
+        import build_feature_table as bft
+        ist2 = pd.read_csv(os.path.join(R, "ihc_stereocilia_cells_v2.csv")); pb = []
+        for f, d in ist2.groupby("field"):
+            try: inb = bft.outline_in_band(f)
+            except FileNotFoundError: continue
+            d = d.assign(inband=d.cell.map(inb))
+            st_ = d[(d.category == "standing") & ~d.tip_may_be_cut.astype(bool) & ~d.bundle_at_image_edge.astype(bool) & (d.inband >= bft.IHC_MIN_IN_BAND)]
+            pb.append(st_.assign(value=st_.height_um - bft.IHC_BASE_SHIFT_UM if hasattr(bft, "IHC_BASE_SHIFT_UM") else st_.height_um - 0.38)[["field", "value"]])
+        if pb:
+            P_ = pd.concat(pb); P_["mouse"] = P_.field.map(FT.mouse)
+            # the minimum counts bundles in fields that enter the comparisons (damaged fields not counted)
+            n = P_[~P_.field.map(FT.damaged).fillna(False).astype(bool)].groupby("mouse").size().reindex(P_.mouse.unique(), fill_value=0)
+            P_ = P_[P_.mouse.map(n) >= IHC_POOLED_MIN]
+            L.append(P_[["field", "value"]].assign(cell_type="IHC", measure="bundle height, standing bundles pooled per mouse (um)",
+                                                   family="inner hair cell front view"))
+            print("inner hair cell height pooled: bundles per mouse in undamaged fields", n.sort_index().to_dict(), f"(mice with fewer than {IHC_POOLED_MIN} not assessed)")
+    except Exception as ex:
+        print("inner hair cell pooled height not computed:", ex)
+    # hand-clicked inner hair cell bundle heights (tip minus base, front view), pooled per mouse, every clicked bundle
+    # counts once; a hand reference shown beside the automatic heights (no minimum, as every bundle was checked by eye)
+    hp = os.path.join(getattr(S, "ANNOTATIONS", r"E:\Webber_confocal\annotations"), "reference_tables", "ihc_bundle_base_tip_front_clicks.csv")
+    if os.path.exists(hp):
+        h = pd.read_csv(hp); h = h[h.field.isin(FT.index)].assign(value=lambda d: d.tip_um - d.base_um)
+        h = h[h.value >= 0.5]
+        if len(h):
+            L.append(h[["field", "value"]].assign(cell_type="IHC", measure="bundle height, hand clicks pooled per mouse (um)",
+                                                  family="inner hair cell height (hand clicks)"))
+            print("inner hair cell hand heights: bundles per mouse", h.field.map(FT.mouse).value_counts().sort_index().to_dict())
     LONG = pd.concat(L, ignore_index=True)
     for c in ["group", "turn", "mouse"]: LONG[c] = LONG.field.map(FT[c])
     LONG["flagged"] = LONG.field.map(FT.damaged).fillna(False).astype(bool)

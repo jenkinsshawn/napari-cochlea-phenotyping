@@ -151,3 +151,36 @@ def parse_step_list(text: str) -> List[tuple]:
         m = re.match(r"\s*\d+\s+(\w+)\s+(done|-)\s", line)
         if m: out.append((m.group(1), m.group(2) == "done"))
     return out
+
+
+def redo_statistics_command(results_folder: str, groups_csv: str, control: str = "",
+                            scripts_folder: Optional[str] = None, python: Optional[str] = None):
+    """Command and environment that redo the statistics of a finished run with another genotype table (columns mouse,
+    group), without measuring again. Returns (argv, env) or raises FileNotFoundError."""
+    import sys
+    sc = scripts_folder or find_scripts_folder()
+    if not sc or not os.path.exists(os.path.join(sc, "phenotype_statistics.py")):
+        raise FileNotFoundError(f"pipeline scripts not found; set {SCRIPTS_ENV}")
+    if not os.path.exists(groups_csv):
+        raise FileNotFoundError(groups_csv)
+    argv = [python or sys.executable, os.path.join(sc, "phenotype_statistics.py"), "--groups", groups_csv]
+    if control:
+        argv += ["--control", control]
+    env = dict(os.environ); env["PYTHONPATH"] = ""
+    env.setdefault("JOBLIB_MULTIPROCESSING", "0")
+    run_copy = os.path.join(results_folder, SETTINGS_COPY)
+    if os.path.exists(run_copy):
+        env["CONFOCAL_SETTINGS"] = run_copy
+    return argv, env
+
+
+def groups_in_table(groups_csv: str) -> List[str]:
+    """Group names in a genotype table (second column), in order of first appearance."""
+    import csv
+    out: List[str] = []
+    with open(groups_csv, newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.reader(fh))
+    for r in rows[1:]:
+        if len(r) >= 2 and r[1].strip() and r[1].strip() not in out:
+            out.append(r[1].strip())
+    return out
