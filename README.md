@@ -2,6 +2,8 @@
 
 ![Outer hair cell bundles of rows 1 and 2](napari-cochlea-phenotyping/docs/harp_banner.png)
 
+Harp is named after Helmholtz's picture of the cochlea as a harp, with each place along it tuned to its own pitch.
+
 Automatic measurement of hair cells in confocal images of mouse cochlear whole mounts, as a napari plugin: stereocilia
 bundle shape and texture, inner hair cell bundles in 3D, the order and straightness of the outer hair cell rows,
 nucleus size and chromatin, and hair cell identity from Calb2, Ocm or PMCA2. Group comparisons are reported with and
