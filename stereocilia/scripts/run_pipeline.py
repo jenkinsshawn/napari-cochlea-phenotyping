@@ -15,18 +15,29 @@ Steps, in the order their inputs require (approximate times on the Creighton wor
    8 rows              hair_cell_rows_classify.py                outer hair cell rows (trained classifiers)
    9 ihc_stacks        ihc_stacks.py --v2                        inner hair cell cut-outs (second frame)       15-20 min
   10 ihc_stereocilia   ihc_stereocilia.py --v2                   inner hair cell bundle base, tip, height      about 6 s per cell
-  11 ohc_bundle_shape  ohc_bundles_v2.py                         outer hair cell bundle span and bend
-  12 ohc1_stacks       ohc1_stacks.py                            first-row outer hair cell cut-outs
-  13 ohc1_height       ohc1_bundle_height.py                     first-row bundle height                        1 min
-  14 nuclei            nuclei_cellpose.py --gpu                  nucleus outlines (graphics card)               about 17 s per field
-  15 ihc_nuclei        ihc_nuclei_calb2.py                       inner hair cell nuclei and Calb2               40 min
-  16 settings          imaging_settings.py                       imaging settings and comparability warnings    1 min
-  17 features          build_feature_table.py                    field table and group comparisons              1 min
-  18 checks            run_checks.py                             agreement with the hand references             5 min
-Steps 3, 7, 9, 12 and 14 (and the stacks inside step 6) skip fields whose outputs already exist. To recompute
+  11 ihc_bundle_shape  ihc_bundle_shape.py                       inner hair cell bundle 3D shape (front view)  1 min
+  12 ohc_bundle_shape  ohc_bundles_v2.py                         outer hair cell bundle span and bend
+  13 spatial           spatial_stats.py                          spacing, alignment and neighbor measures
+  14 row_order         row_order.py                              straightness and order of the outer hair cell rows
+  15 ohc1_stacks       ohc1_stacks.py                            first-row outer hair cell cut-outs
+  16 ohc1_height       ohc1_bundle_height.py                     first-row bundle height                        1 min
+  17 nuclei            nuclei_cellpose.py --gpu                  nucleus outlines (graphics card)               about 17 s per field
+  18 ihc_nuclei        ihc_nuclei_calb2.py                       inner hair cell nuclei and Calb2               40 min
+  19 chromatin         nucleus_chromatin.py                      nucleus size, shape, DAPI and chromatin        about 50 s per field
+  20 hair_cell_nuclei  hair_cell_nuclei.py                       nucleus of each inner and outer hair cell
+  21 identity         hair_cell_identity.py                     inner-like and outer-like hair cells (Calb2, Ocm, PMCA2)
+  22 pillars           pillar_heads.py                           pillar cell heads
+  23 settings          imaging_settings.py                       imaging settings and comparability warnings    1 min
+  24 field_quality     field_quality.py                          image quality and surface depth and slope       1 min
+  25 features          build_feature_table.py                    field table and group comparisons              1 min
+  26 bundle_phenotypes bundle_phenotypes.py                      bundle outline, texture, height and volume     5 min
+  27 cell_phenotypes   cell_phenotypes.py                        cell surface, row packing, polarity, nuclei
+  28 phenotype_statistics phenotype_statistics.py --with-noise-adjusted  group tests, unadjusted and noise-adjusted  12 min
+  29 checks            run_checks.py                             agreement with the hand references             5 min
+  30 report            report_run.py                             results report (Word) and four CSV tables
+Steps 3, 7, 9, 15 and 17 (and the stacks inside step 6) skip fields whose outputs already exist. To recompute
 everything, run into a fresh work and results folder with a settings copy (--settings); the done-markers are kept
 in that work folder, so a fresh folder also starts the step list from the top.
-Not yet a step: pillar heads (the feature table uses results\\pillar_heads_fields.csv when present).
 
 Run (imaging env, from the scripts folder):
     python run_pipeline.py                     every step not yet done
@@ -52,12 +63,15 @@ STEPS = [("fields", ["make_field_pictures.py", "--redo"]), ("cells_v0", ["outlin
          ("ihc_cells", ["ihc_cellpose.py", "--gpu"]), ("cells_v1", ["outline_cells.py", "--tag", "v1", "--base", "v0", "--redo", "--gpu"]),
          ("cell_types", ["assign_cell_types.py"]), ("ohc_bundles", ["run_bundles_all.py"]), ("ihc_stacks_v1", ["ihc_stacks.py"]),
          ("rows", ["hair_cell_rows_classify.py"]), ("ihc_stacks", ["ihc_stacks.py", "--v2"]), ("ihc_stereocilia", ["ihc_stereocilia.py", "--v2"]),
-         ("ohc_bundle_shape", ["ohc_bundles_v2.py"]), ("spatial", ["spatial_stats.py"]), ("ohc1_stacks", ["ohc1_stacks.py"]), ("ohc1_height", ["ohc1_bundle_height.py"]),
-         ("nuclei", ["nuclei_cellpose.py", "--gpu"]), ("ihc_nuclei", ["ihc_nuclei_calb2.py"]), ("pillars", ["pillar_heads.py"]),
-         ("settings", ["imaging_settings.py"]),
+         ("ihc_bundle_shape", ["ihc_bundle_shape.py"]),
+         ("ohc_bundle_shape", ["ohc_bundles_v2.py"]), ("spatial", ["spatial_stats.py"]), ("row_order", ["row_order.py"]), ("ohc1_stacks", ["ohc1_stacks.py"]), ("ohc1_height", ["ohc1_bundle_height.py"]),
+         ("nuclei", ["nuclei_cellpose.py", "--gpu"]), ("ihc_nuclei", ["ihc_nuclei_calb2.py"]), ("chromatin", ["nucleus_chromatin.py"]),
+         ("hair_cell_nuclei", ["hair_cell_nuclei.py"]), ("identity", ["hair_cell_identity.py"]), ("pillars", ["pillar_heads.py"]),
+         ("settings", ["imaging_settings.py"]), ("field_quality", ["field_quality.py"]),
          ("features", ["build_feature_table.py"]),
          ("bundle_phenotypes", ["bundle_phenotypes.py"]), ("cell_phenotypes", ["cell_phenotypes.py"]),
-         ("phenotype_statistics", ["phenotype_statistics.py"]), ("checks", ["run_checks.py"])]
+         ("phenotype_statistics", ["phenotype_statistics.py", "--with-noise-adjusted"]),
+         ("checks", ["run_checks.py"]), ("report", ["report_run.py"])]
 
 
 def central_now():

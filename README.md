@@ -1,7 +1,11 @@
-# Cochlea Phenotyping
+# Harp
 
-Automatic measurement of hair cells and stereocilia bundles in confocal images of mouse cochlear whole mounts, as a
-napari plugin.
+![Outer hair cell bundles of rows 1 and 2](napari-cochlea-phenotyping/docs/harp_banner.png)
+
+Automatic measurement of hair cells in confocal images of mouse cochlear whole mounts, as a napari plugin: stereocilia
+bundle shape and texture, inner hair cell bundles in 3D, the order and straightness of the outer hair cell rows,
+nucleus size and chromatin, and hair cell identity from Calb2, Ocm or PMCA2. Group comparisons are reported with and
+without adjustment for imaging depth and tissue slope, in a Word report with CSV tables.
 
 ## Install (Windows)
 
@@ -12,8 +16,8 @@ unzipped folder and run:
 powershell -ExecutionPolicy Bypass -File .\install_cochlea_phenotyping.ps1
 ```
 
-Then open napari from the **Cochlea Phenotyping** shortcut on the Desktop. See
-`napari-cochlea-phenotyping/Cochlea_Phenotyping_user_guide.docx` for a step-by-step guide.
+Then open napari from the **Harp** shortcut on the Desktop. See
+`napari-cochlea-phenotyping/Harp_user_guide.docx` for a step-by-step guide.
 
 ## Contents
 

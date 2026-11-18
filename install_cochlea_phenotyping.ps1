@@ -1,4 +1,4 @@
-﻿# Installs the Cochlea Phenotyping napari plugin and its measurement pipeline (Windows, no administrator rights needed).
+﻿# Installs the Harp napari plugin and its measurement pipeline (Windows, no administrator rights needed).
 #
 # Run it from the folder that holds this file (the downloaded napari-cochlea-phenotyping repository, with the folders
 # napari-cochlea-phenotyping, stereocilia and models):
@@ -14,8 +14,8 @@
 #   3. Tells the plugin where the pipeline scripts and trained models are (COCHLEA_PIPELINE_SCRIPTS and
 #      COCHLEA_PIPELINE_MODELS, set inside the Desktop shortcuts only, so other napari installs are not affected), downloads the Cellpose-SAM model (about 1.2 GB),
 #      loads every trained model once and runs the plugin's own tests.
-#   4. Puts two shortcuts on the Desktop: "Cochlea Phenotyping" opens napari with the panel, and
-#      "Cochlea Phenotyping prompt" opens a command window with the environment ready.
+#   4. Puts two shortcuts on the Desktop: "Harp" opens napari with the panel, and
+#      "Harp prompt" opens a command window with the environment ready.
 # Everything is written to install_log.txt next to this file. Running it again is safe: finished parts are kept.
 
 param([switch]$Rebuild, [switch]$CpuOnly)
@@ -111,7 +111,7 @@ function InstallCudaTorch([switch]$NoDeps) {
 if ($nvidia.Count -gt 0 -and -not (CudaTorchWorks)) {
     if (-not (InstallCudaTorch)) { Write-Host "Could not install PyTorch with graphics card support; the pipeline will run on the processor." -ForegroundColor Yellow }
 }
-Pip @("install", "napari[all]", "scikit-learn==$SklearnVersion", "pytest")
+Pip @("install", "napari[all]", "scikit-learn==$SklearnVersion", "pytest", "python-docx")
 Pip @("install", "-e", ($PluginDir + "[pipeline]"))
 if ($nvidia.Count -gt 0 -and -not (CudaTorchWorks)) {
     # a package above replaced PyTorch with the processor-only build; put the graphics card build back
@@ -162,11 +162,11 @@ else { Write-Host "All plugin tests passed." -ForegroundColor Green }
 Step "Desktop shortcuts"
 $Activate = Join-Path $Root "Scripts\activate.bat"
 $Desktop = [Environment]::GetFolderPath("Desktop")
-$napariBat = Join-Path $Desktop "Cochlea Phenotyping.bat"
-$promptBat = Join-Path $Desktop "Cochlea Phenotyping prompt.bat"
+$napariBat = Join-Path $Desktop "Harp.bat"
+$promptBat = Join-Path $Desktop "Harp prompt.bat"
 $setVars = @("set COCHLEA_PIPELINE_SCRIPTS=$ScriptsDir", "set COCHLEA_PIPELINE_MODELS=$ModelsDir", "set PYTHONPATH=")
 Set-Content -Path $napariBat -Encoding ASCII -Value (@("@echo off") + $setVars + @("call `"$Activate`" $EnvName", "napari -w napari-cochlea-phenotyping"))
 Set-Content -Path $promptBat -Encoding ASCII -Value (@("@echo off") + $setVars + @("cmd /k `"call `"$Activate`" $EnvName`""))
-Write-Host "Double-click 'Cochlea Phenotyping' on the Desktop to open napari with the panel."
+Write-Host "Double-click 'Harp' on the Desktop to open napari with the panel."
 Step "Done"
 Stop-Transcript | Out-Null

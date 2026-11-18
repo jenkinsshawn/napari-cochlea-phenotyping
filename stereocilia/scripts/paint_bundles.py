@@ -20,6 +20,10 @@ seconds and on every field change, to E:\\Webber_confocal\\annotations\\bundle_s
 Run from the scripts folder:
     python paint_bundles.py
     python paint_bundles.py --start AR47      (open at the first field whose name contains AR47)
+    python paint_bundles.py --fields "<field>,<field>" --height 3.5 --ihc   (only those fields, opened 3.5 um up,
+                                               inner hair cells marked with yellow points)
+    python paint_bundles.py --fields "<field>,<field>" --rings   (outer hair cell bundles whose outline runs onto the
+                                               rim below them marked with orange points; paint the rim NOT BUNDLE)
 Each field opens about 1.5 um above the surface; inner hair cell bundles are often 3 to 5 um up.
 The stacks are made once beforehand with:  python paint_bundles.py --prepare  (needs nd2);
 python paint_bundles.py --prepare --all makes them for every field, for the bundle detector.
@@ -103,9 +107,9 @@ def scaled(im):
 
 
 class Tool:
-    def __init__(self, fields):
+    def __init__(self, fields, start_um=1.5, mark_ihc=False, mark_rings=False):
         import napari
-        self.fields, self.k = fields, 0
+        self.fields, self.k, self.start_um, self.mark_ihc, self.mark_rings = fields, 0, start_um, mark_ihc, mark_rings
         os.makedirs(OUT, exist_ok=True)
         self.v = napari.Viewer(title="Bundle strokes")
         self.keys = {"b": self.choose(1), "x": self.choose(2), "e": self.eraser, "v": self.toggle_pm,
@@ -120,6 +124,31 @@ class Tool:
         except Exception:
             self.timer = None
         self.load()
+
+    def add_ihc_marks(self, f):
+        """Yellow points at the inner hair cells (from the cell types), so it is clear which bundles to paint."""
+        try:
+            from scipy import ndimage as ndi
+            ty = pd.read_csv(os.path.join(S.WORK, "cells", "types", f + "_types.csv")); ty = ty[ty.row == "IHC"]
+            if not len(ty): return
+            if "inner_cell_id" in ty and (ty.inner_cell_id > 0).any():          # surface and body pieces of one cell count once
+                ty = ty.assign(k=np.where(ty.inner_cell_id > 0, ty.inner_cell_id, -ty.cell)).groupby("k")[["y", "x"]].mean()
+            pts = ty[["y", "x"]].values
+            self.v.add_points(pts, name="inner hair cells", size=9, face_color="yellow", border_color="black", opacity=0.8)
+            self.v.layers.selection.active = self.lab
+        except Exception as e:
+            print("inner hair cell marks not shown:", e)
+
+    def add_ring_marks(self, f):
+        """Orange points at outer hair cell bundles whose outline runs onto the rim below the bundle (ring_bundles.csv):
+        paint NOT BUNDLE (x) over the rim next to each point."""
+        try:
+            r = pd.read_csv(os.path.join(OUT, "ring_bundles.csv")); r = r[r.field == f]
+            if not len(r): return
+            self.v.add_points(r[["y", "x"]].values, name="outlines running onto the rim", size=11, face_color="orange", border_color="black", opacity=0.8)
+            self.v.layers.selection.active = self.lab
+        except Exception as e:
+            print("ring marks not shown:", e)
 
     def path(self):
         return os.path.join(OUT, self.fields[self.k] + "_strokes.npz")
@@ -155,7 +184,9 @@ class Tool:
             for k, fn in self.keys.items():
                 lyr.bind_key(k, (lambda g: (lambda layer: g(self.v)))(fn), overwrite=True)
         self.v.layers.selection.active = self.lab
-        self.v.dims.current_step = (int(np.argmin(np.abs(self.heights - 1.5))), 0, 0)   # open about 1.5 um above
+        self.v.dims.current_step = (int(np.argmin(np.abs(self.heights - self.start_um))), 0, 0)   # open at the chosen height
+        if self.mark_ihc: self.add_ihc_marks(f)
+        if self.mark_rings: self.add_ring_marks(f)
         self.v.dims.events.current_step.connect(self.status)
         self.v.reset_view(); self.status()
 
@@ -223,13 +254,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prepare", action="store_true"); ap.add_argument("--redo", action="store_true"); ap.add_argument("--start", default="")
     ap.add_argument("--all", action="store_true", help="with --prepare: every field with cell types, not only the painting fields")
+    ap.add_argument("--fields", default="", help="paint only these fields (full names separated by commas)")
+    ap.add_argument("--height", type=float, default=1.5, help="height above the surface each field opens at (um)")
+    ap.add_argument("--ihc", action="store_true", help="mark the inner hair cells with yellow points")
+    ap.add_argument("--rings", action="store_true", help="mark outer hair cell bundles whose outline runs onto the rim (orange points)")
     a = ap.parse_args()
     if a.prepare:
         return prepare(all_fields() if a.all else None)
     import napari
-    t = Tool(PAINT_FIELDS)
+    fields = [f.strip() for f in a.fields.split(",") if f.strip()] or PAINT_FIELDS
+    missing = [f for f in fields if not os.path.exists(os.path.join(STACKS, f + ".npz"))]
+    if missing: print("no stack for:", missing); fields = [f for f in fields if f not in missing]
+    t = Tool(fields, a.height, a.ihc, a.rings)
     if a.start:
-        t.k = next((i for i, f in enumerate(PAINT_FIELDS) if a.start in f), 0); t.load()
+        t.k = next((i for i, f in enumerate(fields) if a.start in f), 0); t.load()
     napari.run()
     t.save()
 

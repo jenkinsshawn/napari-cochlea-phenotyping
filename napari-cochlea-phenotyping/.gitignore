@@ -11,3 +11,8 @@ __pycache__/
 *.tiff
 *.npz
 *.pth
+
+# download-and-install script, shared in the folder only
+Install_Harp.ps1
+Install_Harp.bat
+Install_Harp_log.txt

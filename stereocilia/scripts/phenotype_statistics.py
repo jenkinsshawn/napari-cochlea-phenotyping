@@ -2,7 +2,8 @@
 bundle-level models.
 
 Reads (RESULTS unless noted): bundle_phenotypes_cells.csv, hair_cell_rows_cells.csv, cell_phenotype_fields.csv,
-ihc_stereocilia_cells_v2.csv, feature_table_fields.csv; ANNOTATIONS\\bundle_scores (inner hair cell organization
+ihc_stereocilia_cells_v2.csv, ihc_bundle_shape_cells.csv, row_order_fields.csv, hair_cell_nuclei_fields.csv and hair_cell_identity_fields.csv (optional),
+feature_table_fields.csv; ANNOTATIONS\\bundle_scores (inner hair cell organization
 scores, both sets, repeats and 'cannot tell' left out); ANNOTATIONS\\reference_tables\\ohc_rows_corrected_2026-11-16.csv.
 
 Families: bundle panel (field median, 10th and 90th percentile, IQR, share outside the control 5-95% range with
@@ -51,7 +52,77 @@ IHC_POOLED_MIN = 10       # standing bundles a mouse needs for the pooled inner 
 
 def tag(g):
     return re.sub(r"[^0-9A-Za-z]+", "_", str(g)).strip("_")
-META = ["field", "cell", "row", "shape_check", "condition", "x", "y", "noise_sd"]
+META = ["field", "cell", "row", "shape_check", "condition", "x", "y", "noise_sd", "confidence", "local_depth_um", "local_slope_deg", "outline_ring_um2"]
+NOISE_COVARIATES = ["local_depth_um", "local_slope_deg"]
+NOISE_P = 0.01   # a measure is adjusted only when its within-field depth and slope effects are clear (jackknife Wald test over fields)
+OUT_SUFFIX = ""   # "_noise_adjusted" with --adjust-noise
+
+
+def out_path(name):
+    b, e = os.path.splitext(name); return os.path.join(R, b + OUT_SUFFIX + e)
+
+
+def noise_adjust(df, type_col, measures, fit_rows=None, label=""):
+    """Each cell's value shifted to the typical surface depth and slope: for each cell type and measure, the effects of
+    local_depth_um and local_slope_deg are estimated within fields (values and covariates centered on their field means,
+    least squares over all fields, so genotype, mouse and field do not enter the estimate), and each cell gets
+    value - effects x (its covariates - the median covariates of that cell type), when the effects are clear (P < NOISE_P,
+    Wald test with a leave-one-field-out covariance; otherwise values are left as they are). fit_rows: rows used
+    for the estimate (default all). Returns the adjusted copy and one row of coefficients per cell type and measure."""
+    out = df.copy(); recs = []
+    if not all(c in df for c in NOISE_COVARIATES): return out, pd.DataFrame()
+    for m in measures: out[m] = pd.to_numeric(out[m], errors="coerce").astype(float)
+    fit_rows = pd.Series(True, index=df.index) if fit_rows is None else fit_rows
+    for t, g in df[fit_rows].groupby(type_col):
+        C = g[NOISE_COVARIATES].astype(float); okc = C.notna().all(axis=1); ref = C[okc].median()
+        app = df[(df[type_col] == t)]; Ca = app[NOISE_COVARIATES].astype(float); oka = Ca.notna().all(axis=1)
+        for m in measures:
+            v = pd.to_numeric(g[m], errors="coerce"); ok = okc & v.notna()
+            if ok.sum() < 30 or v[ok].std() == 0: continue
+            f = g.loc[ok, "field"]; Y = v[ok] - v[ok].groupby(f).transform("mean"); X = C[ok] - C[ok].groupby(f).transform("mean")
+            if (X.std() < 1e-9).any(): continue
+            beta = np.linalg.lstsq(X.values, Y.values, rcond=None)[0]
+            ss = float((Y.values ** 2).sum()); r2 = 1 - float(((Y.values - X.values @ beta) ** 2).sum()) / ss if ss > 0 else np.nan
+            # leave-one-field-out (jackknife) covariance of the effects: cells of one field are not independent
+            fl = f.values; uf = np.unique(fl); bj = []
+            for ff in uf:
+                kk = fl != ff
+                if kk.sum() > 10: bj.append(np.linalg.lstsq(X.values[kk], Y.values[kk], rcond=None)[0])
+            bj = np.array(bj); nj = len(bj); P_eff = np.nan
+            if nj >= 5:
+                cv = (nj - 1) / nj * (bj - bj.mean(0)).T @ (bj - bj.mean(0))
+                try: wald = float(beta @ np.linalg.solve(cv, beta)); P_eff = float(st.chi2.sf(wald, len(beta)))
+                except np.linalg.LinAlgError: pass
+            applied = bool(P_eff == P_eff and P_eff < NOISE_P)
+            if applied:
+                va = pd.to_numeric(app[m], errors="coerce"); k = oka & va.notna()
+                out.loc[app.index[k], m] = va[k] - (Ca[k] - ref).values @ beta
+            recs.append(dict(source=label, cell_type=t, measure=m, cells=int(ok.sum()), fields=int(f.nunique()),
+                             **{f"effect_per_unit_{c}": b for c, b in zip(NOISE_COVARIATES, beta)},
+                             within_field_share_explained=r2, P_effect=P_eff, adjusted=applied, **{f"reference_{c}": ref[c] for c in NOISE_COVARIATES}))
+    return out, pd.DataFrame(recs)
+RELIABILITY_SHAPE = ["area_um2", "major_um", "minor_um", "solidity", "eccentricity", "thickness_um", "perimeter_um", "pieces"]
+
+
+def reliability(PH):
+    """Per bundle (base outline): outlier score = largest robust z (median, 1.4826 x MAD within the cell type) over the
+    outline shape measures, area and perimeter on log scale. Unreliability = mean of the within-cell-type percentile
+    ranks of the outlier score, of low detector confidence and of the outline ring score (those present).
+    Against hand strokes in 8 fields this ranked poor outlines first with AUC 0.75."""
+    extra = [c for c in ("confidence", "outline_ring_um2") if c in PH]
+    B = PH[PH.condition == "base"][["field", "cell", "row"] + RELIABILITY_SHAPE + extra].copy()
+    B["outlier_score"] = np.nan; B["unreliability"] = np.nan
+    for rw, g in B.groupby("row"):
+        X = g[RELIABILITY_SHAPE].apply(pd.to_numeric, errors="coerce")
+        X["area_um2"] = np.log(X.area_um2.clip(lower=1e-6)); X["perimeter_um"] = np.log(X.perimeter_um.clip(lower=1e-6))
+        med = X.median(); mad = 1.4826 * (X - med).abs().median()
+        z = ((X - med) / mad.replace(0, np.nan)).abs().max(axis=1); B.loc[g.index, "outlier_score"] = z
+        r = [z.rank(pct=True)]
+        if "confidence" in g and g.confidence.notna().any(): r.append((-g.confidence).rank(pct=True))
+        if "outline_ring_um2" in g and g.outline_ring_um2.notna().any(): r.append(g.outline_ring_um2.rank(pct=True))
+        B.loc[g.index, "unreliability"] = pd.concat(r, axis=1).mean(axis=1)
+    B["unreliability_rank_in_cell_type"] = B.groupby("row").unreliability.rank(pct=True)
+    return B[["field", "cell", "row", "outlier_score"] + extra + ["unreliability", "unreliability_rank_in_cell_type"]]
 
 
 def field_info(groups_csv=None):
@@ -105,8 +176,18 @@ def robustness(PH, FT, MEAS):
     return pd.DataFrame(out)
 
 
-def long_table(FT):
+def long_table(FT, drop_share=0.0, adjust=False):
     PH = pd.read_csv(os.path.join(R, "bundle_phenotypes_cells.csv")); MEAS = [c for c in PH.columns if c not in META]
+    NA = []
+    REL = reliability(PH); REL["dropped"] = REL.unreliability_rank_in_cell_type > 1 - drop_share if drop_share > 0 else False
+    REL.to_csv(os.path.join(R, "bundle_reliability_cells.csv"), index=False)
+    if drop_share > 0:   # leave out the given share of least reliable bundles in each cell type, in every condition
+        bad = set(map(tuple, REL.loc[REL.dropped, ["field", "cell"]].values))
+        PH = PH[[(f, c) not in bad for f, c in zip(PH.field, PH.cell)]].copy()
+        print(f"left out the {drop_share:.0%} least reliable bundles in each cell type: {len(bad)} bundles")
+    if adjust:   # coefficients estimated on the base outlines, applied to every processing condition
+        if not all(c in PH for c in NOISE_COVARIATES): raise SystemExit("--adjust-noise needs local_depth_um and local_slope_deg: rerun bundle_phenotypes.py")
+        PH, na = noise_adjust(PH, "row", MEAS, PH.condition == "base", "top-view bundles"); NA.append(na)
     hc = pd.read_csv(os.path.join(R, "hair_cell_rows_cells.csv"))
     B = PH[PH.condition == "base"].copy(); B["u"] = np.nan
     for f, idx in B.groupby("field").groups.items():
@@ -143,12 +224,38 @@ def long_table(FT):
     CF = pd.read_csv(os.path.join(R, "cell_phenotype_fields.csv"))
     add(CF, "row", "hair cell surface", ["surface_area_um2", "surface_perimeter_um", "surface_eccentricity", "surface_solidity", "surface_elongation", "surface_axis_vs_row_deg", "surface_area_cv", "nearest_cell_um"])
     add(CF, "row", "row packing", ["gaps_per_100um", "spacing_cv"])
+    ro = os.path.join(R, "row_order_fields.csv")
+    if os.path.exists(ro):   # straightness and order of the outer hair cell rows (row_order.py)
+        add(pd.read_csv(ro), "row", "outer hair cell row order", ["row_line_deviation_um", "row_line_deviation_p90_um", "share_off_line", "share_out_of_order", "row_zigzag_um"])
     add(CF, "row", "bundle polarity", ["polarity_abs_dev_deg", "polarity_share_off30", "polarity_signed_mean_deg", "polarity_circ_sd_deg", "polarity_neighbor_diff_deg"])
-    add(CF[CF.row.isin(["OHC2", "OHC3"])], "row", "outer hair cell nuclei (not validated)", ["nucleus_area_um2", "nucleus_volume_um3", "nucleus_depth_um"])
+    hn = os.path.join(R, "hair_cell_nuclei_fields.csv"); hi = os.path.join(R, "hair_cell_identity_fields.csv")
+    NUC_M = ["volume_um3", "equivalent_diameter_um", "elongation", "sphericity", "dapi_total_rel", "dapi_mean_rel", "dapi_cv",
+             "chromocenter_count", "chromocenter_share", "chromatin_glcm_contrast", "chromatin_glcm_homogeneity", "depth_um"]
+    hnc = os.path.join(R, "hair_cell_nuclei_cells.csv")
+    if os.path.exists(hn) and os.path.exists(hnc):   # nucleus size, shape, DAPI and chromatin of each hair cell (hair_cell_nuclei.py)
+        NC_ = pd.read_csv(hnc)
+        if adjust:   # nucleus depth is a measure itself and is not adjusted
+            NC_, na = noise_adjust(NC_, "cell_type", [m for m in NUC_M if m != "depth_um"], None, "hair cell nuclei"); NA.append(na)
+        HN = NC_.groupby(["field", "cell_type"])[NUC_M].median().reset_index().merge(
+            pd.read_csv(hn)[["field", "cell_type", "nucleus_matched_share"]], on=["field", "cell_type"], how="left")
+        HN = HN.rename(columns={m: "nucleus " + m for m in NUC_M}); nm_ = ["nucleus " + m for m in NUC_M]
+        add(HN[HN.cell_type == "IHC"], "cell_type", "inner hair cell nuclei and chromatin", nm_)
+        add(HN[HN.cell_type != "IHC"], "cell_type", "outer hair cell nuclei and chromatin (not validated)", nm_ + ["nucleus_matched_share"])
+    else:
+        add(CF[CF.row.isin(["OHC2", "OHC3"])], "row", "outer hair cell nuclei (not validated)", ["nucleus_area_um2", "nucleus_volume_um3", "nucleus_depth_um"])
+    if os.path.exists(hi):   # marker identity (hair_cell_identity.py)
+        add(pd.read_csv(hi), "cell_type", "hair cell identity (markers)", ["inner_like_outer_cells_per_100um", "inner_like_outer_share", "outer_like_inner_share", "ihc_over_ohc_calb2"])
     ist = pd.read_csv(os.path.join(R, "ihc_stereocilia_cells_v2.csv")); ist["cell_type"] = "IHC"
-    fv = ist[ist.category != "no bundle"].groupby(["field", "cell_type"])[["width_along_um", "depth_across_um", "volume_um3", "length_um"]].median().reset_index()
+    shp = os.path.join(R, "ihc_bundle_shape_cells.csv"); shape_cols = []
+    if os.path.exists(shp):   # 3D shape of the front-view outline (ihc_bundle_shape.py)
+        shape_cols = ["surface_um2", "compactness", "solidity_3d", "thickness_um"]
+        sh_ = pd.read_csv(shp); ist = ist.merge(sh_[["field", "cell"] + shape_cols + [c for c in NOISE_COVARIATES if c in sh_]], on=["field", "cell"], how="left")
+    if adjust:
+        fvm = ["width_along_um", "depth_across_um", "volume_um3", "length_um", "height_um", "lean_deg"] + shape_cols
+        ist, na = noise_adjust(ist, "cell_type", [m for m in fvm if m in ist], ist.category != "no bundle", "front-view inner hair cell bundles"); NA.append(na)
+    fv = ist[ist.category != "no bundle"].groupby(["field", "cell_type"])[["width_along_um", "depth_across_um", "volume_um3", "length_um"] + shape_cols].median().reset_index()
     fv["share_lying_flat"] = ist.groupby("field").category.apply(lambda s: (s == "lying flat").mean()).reindex(fv.field).values
-    add(fv, "cell_type", "inner hair cell front view", ["width_along_um", "depth_across_um", "volume_um3", "length_um", "share_lying_flat"], "front view ")
+    add(fv, "cell_type", "inner hair cell front view", ["width_along_um", "depth_across_um", "volume_um3", "length_um", "share_lying_flat"] + shape_cols, "front view ")
     ft = FT.reset_index().assign(cell_type="IHC"); add(ft, "cell_type", "inner hair cell front view", ["ihc_bundle_height_standing_um", "ihc_bundle_lean_standing_deg"])
     sc = []
     for name, key in [("organization", "key_organization.csv"), ("organization_ihc", "key_organization_ihc.csv")]:
@@ -197,7 +304,7 @@ def long_table(FT):
     # counts once (rows are bundles); a mouse with fewer than IHC_POOLED_MIN bundles is not assessed.
     try:
         import build_feature_table as bft
-        ist2 = pd.read_csv(os.path.join(R, "ihc_stereocilia_cells_v2.csv")); pb = []
+        ist2 = ist.copy() if adjust else pd.read_csv(os.path.join(R, "ihc_stereocilia_cells_v2.csv")); pb = []
         for f, d in ist2.groupby("field"):
             try: inb = bft.outline_in_band(f)
             except FileNotFoundError: continue
@@ -227,6 +334,8 @@ def long_table(FT):
     LONG = pd.concat(L, ignore_index=True)
     for c in ["group", "turn", "mouse"]: LONG[c] = LONG.field.map(FT[c])
     LONG["flagged"] = LONG.field.map(FT.damaged).fillna(False).astype(bool)
+    if adjust and NA:
+        pd.concat(NA, ignore_index=True).to_csv(os.path.join(R, "noise_adjustment_effects.csv"), index=False)
     return LONG, PH, B, MEAS
 
 
@@ -286,6 +395,22 @@ def analyze(d):
                 r[f"{t_}_P"] = float(np.mean(np.abs(nul) >= abs(obs) - 1e-12))
             else:
                 r[f"{t_}_P"] = r[f"{t_}_P_two_groups_only"]
+        # every pair of non-control groups, same relabeling; then Holm adjustment over all pairs of groups
+        for gi, gj in combinations(range(1, len(GR)), 2):
+            a_, b_ = GR[gi], GR[gj]; sub = mm[mm.group.isin([a_, b_])]
+            if sub.group.nunique() < 2: continue
+            x = sub.res.values; k = (sub.group == b_).values; obs = x[k].mean() - x[~k].mean(); key = f"{tag(b_)}_vs_{tag(a_)}"
+            _, lo, hi = welch(x[~k], x[k]); r.update({f"{key}_difference": obs, f"{key}_ci_low": lo, f"{key}_ci_high": hi})
+            if A is not None:
+                xa = mm.res.values; nul = np.array([xa[a == gj].mean() - xa[a == gi].mean() for a in A]); r[f"{key}_P"] = float(np.mean(np.abs(nul) >= abs(obs) - 1e-12))
+            else:
+                null2 = np.array([x[list(c)].mean() - np.delete(x, list(c)).mean() for c in combinations(range(len(x)), k.sum())]); r[f"{key}_P"] = float(np.mean(np.abs(null2) >= abs(obs) - 1e-12))
+        pk = [f"{tag(g)}_P" for g in GR[1:]] + [f"{tag(GR[j])}_vs_{tag(GR[i])}_P" for i, j in combinations(range(1, len(GR)), 2)]
+        pv = [(c, r[c]) for c in pk if c in r and r[c] == r[c]]
+        if pv:
+            order = sorted(pv, key=lambda z: z[1]); run = 0.0
+            for i_, (c, v) in enumerate(order):
+                run = max(run, min(1.0, (len(order) - i_) * v)); r[c[:-2] + "_P_holm"] = run
         out.append(r)
     mg = d.groupby("mouse").group.first()
     if mg.nunique() >= 2 and d.turn.nunique() >= 2 and (mg == ctl).any():
@@ -363,18 +488,25 @@ FIELD_SETS = [("flagged fields left out", True), ("all fields", False)]
 
 
 def main(argv=None):
-    global GR
+    global GR, OUT_SUFFIX
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--groups", help="table with columns mouse, group: genotype per mouse, replacing the settings (statistics only)")
     ap.add_argument("--control", help="name of the control group (default: CONTROL_GROUP from the settings, else 'control')")
+    ap.add_argument("--adjust-noise", action="store_true",
+                    help="shift each bundle to the typical surface depth and slope (effects estimated within fields) before the tests; "
+                         "outputs end in _noise_adjusted")
+    ap.add_argument("--drop-least-reliable", type=float, default=0.0, metavar="SHARE",
+                    help="leave out this share (0-0.5) of the least reliable outer and inner hair cell top-view bundles in each cell type (default 0)")
     a = ap.parse_args(argv)
     groups_csv = a.groups or (os.path.join(R, "groups.csv") if os.path.exists(os.path.join(R, "groups.csv")) else None)
     FT = field_info(groups_csv); field_index(FT).to_csv(os.path.join(R, "fields_index.csv"), index=False)
     control = a.control or getattr(S, "CONTROL_GROUP", "") or "control"
     present = [g for g in FT.group.dropna().unique() if str(g) != ""]
     GR = ([control] if control in present else []) + sorted(g for g in present if g != control)
-    LONG, PH, B, MEAS = long_table(FT); LONG.to_csv(os.path.join(R, "phenotype_field_values_long.csv"), index=False)
-    ROB = robustness(PH, FT, MEAS); ROB.to_csv(os.path.join(R, "bundle_phenotype_robustness.csv"), index=False)
+    if not 0 <= a.drop_least_reliable <= 0.5: ap.error("--drop-least-reliable must be between 0 and 0.5")
+    OUT_SUFFIX = "_noise_adjusted" if a.adjust_noise else ""
+    LONG, PH, B, MEAS = long_table(FT, a.drop_least_reliable, a.adjust_noise); LONG.to_csv(out_path("phenotype_field_values_long.csv"), index=False)
+    ROB = robustness(PH, FT, MEAS); ROB.to_csv(out_path("bundle_phenotype_robustness.csv"), index=False)
     if control not in present or len(GR) < 2 or FT[FT.group.isin(GR)].groupby("group").mouse.nunique().min() < 2:
         msg = (f"group tests not run: need the control group {control!r} and at least one other group with 2 or more mice each "
                f"(groups found: {', '.join(map(str, present)) or 'none'}); the field tables are written. Add a groups table and run:  "
@@ -405,12 +537,24 @@ def main(argv=None):
         print(f"{label}: phenotypes tested {n}; three-group P < 0.05: {(T[a_].get('P_three_group', pd.Series(dtype=float)) < 0.05).sum()}; "
               f"smallest adjusted {T[a_].get('P_three_group_adj', pd.Series([np.nan])).min():.3f}")
     T = pd.concat(allT, ignore_index=True); MV = pd.concat(allMV, ignore_index=True)
-    T.to_csv(os.path.join(R, "phenotype_statistics_all.csv"), index=False); MV.to_csv(os.path.join(R, "phenotype_panel_multivariate.csv"), index=False)
-    pd.concat(allPC, ignore_index=True).to_csv(os.path.join(R, "phenotype_panel_principal_components.csv"), index=False)
-    pd.concat(allMX, ignore_index=True).to_csv(os.path.join(R, "phenotype_bundle_level_models.csv"), index=False)
+    T.to_csv(out_path("phenotype_statistics_all.csv"), index=False); MV.to_csv(out_path("phenotype_panel_multivariate.csv"), index=False)
+    pd.concat(allPC, ignore_index=True).to_csv(out_path("phenotype_panel_principal_components.csv"), index=False)
+    pd.concat(allMX, ignore_index=True).to_csv(out_path("phenotype_bundle_level_models.csv"), index=False)
     print(MV.round(4).to_string(index=False))
     return T, MV
 
 
+def run_all(argv=None):
+    """main() plus two options: --with-noise-adjusted runs the tests a second time with --adjust-noise, and --report then
+    writes the results report (report_run.py)."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    both, rep = "--with-noise-adjusted" in argv, "--report" in argv
+    rest = [x for x in argv if x not in ("--with-noise-adjusted", "--report")]
+    main(rest)
+    if both and "--adjust-noise" not in rest: main(rest + ["--adjust-noise"])
+    if rep:
+        import report_run; report_run.main()
+
+
 if __name__ == "__main__":
-    main()
+    run_all()

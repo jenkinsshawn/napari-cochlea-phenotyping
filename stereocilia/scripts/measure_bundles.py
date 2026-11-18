@@ -64,6 +64,24 @@ TYPES = os.path.join(CELLS, "types")
 OUT = os.path.join(S.WORK, 'bundles')
 LOW_UM, HIGH_UM = 0.6, 3.0        # bundle layer, um above the cell surface
 REACH_UM = 2.5                    # how far outside its cell a bundle may reach
+RING_OPEN_UM = float(getattr(S, "BUNDLE_RING_OPEN_UM", 0.9))   # outer hair cells: where the outline closes around a hole, pixels
+                                  # lower than this above the plate (the rim of the cell top) are removed
+
+
+def open_ring(m, height, px, cut=None):
+    """Remove the low rim that closes an outer hair cell outline into a ring: pixels next to the enclosed hole and
+    lower than cut above the plate. The largest remaining piece is kept."""
+    cut = RING_OPEN_UM if cut is None else cut
+    if cut <= 0: return m
+    ys, xs = np.nonzero(m); y0, x0 = max(ys.min() - 15, 0), max(xs.min() - 15, 0)
+    sl = (slice(y0, ys.max() + 16), slice(x0, xs.max() + 16)); mc = m[sl]
+    hole = ndi.binary_fill_holes(ndi.binary_closing(mc, iterations=3)) & ~mc
+    if hole.sum() * px * px < 0.3: return m
+    m2 = mc & ~(ndi.binary_dilation(hole, iterations=3) & (height[sl] < cut))
+    lab_, n = ndi.label(m2)
+    if n == 0: return m
+    out = np.zeros_like(m); out[sl] = lab_ == (np.bincount(lab_.ravel())[1:].argmax() + 1)
+    return out
 BUNDLE_SIDE = -1                  # bundles stand on the side of lower image numbers (checked by eye)
 USE_DETECTOR = "--detector" in sys.argv
 PROB = os.path.join(S.WORK, 'bundle_prob')
@@ -286,6 +304,7 @@ def measure_field(field):
         if m.sum() * px * px < 1.0:
             rows.append(dict(cell=c.cell, row=c.row, found=False)); continue
         lab = label(m); big = np.bincount(lab.ravel())[1:].argmax() + 1; m = lab == big
+        if USE_DETECTOR and c.row.startswith("OHC"): m = open_ring(m, height, px)
         if m.sum() * px * px < 1.0:
             rows.append(dict(cell=c.cell, row=c.row, found=False)); continue
         out[m] = c.cell

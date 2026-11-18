@@ -10,7 +10,7 @@ from qtpy.QtCore import Qt, QUrl
 from qtpy.QtGui import QColor, QDesktopServices
 from qtpy.QtCore import QProcess, QProcessEnvironment
 from qtpy.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton,
-                            QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                            QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ._results import LEVEL_COLORS, LEVELS, TABLES, Results, open_results
 
@@ -53,8 +53,10 @@ class ResultsTab(QWidget):
         f = QHBoxLayout(); self.group_box = QComboBox(); self.group_box.currentIndexChanged.connect(lambda _: self._fill_comparisons())
         self.all_box = QCheckBox("include quality checks and measures that are not validated"); self.all_box.toggled.connect(lambda _: self._fill_comparisons())
         f.addWidget(self.group_box); f.addWidget(self.all_box, 1); lay.addLayout(f)
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(["measure", "group", "status", "control median", "group median", "difference", "P", "adjusted P"])
+        self.p05_box = QCheckBox("P below 0.05 only"); self.p05_box.setChecked(True); self.p05_box.toggled.connect(lambda _: self._fill_comparisons()); f.addWidget(self.p05_box)
+        self.table = QTableWidget(0, 10)
+        self.table.setHorizontalHeaderLabels(["measure", "group", "status", "control", "group value", "difference", "P", "adjusted P",
+                                              "difference, noise adjusted", "P, noise adjusted"])
         self._setup(self.table); lay.addWidget(self.table, 1)
         self.warn = QLabel(""); self.warn.setWordWrap(True); self.warn.setTextFormat(Qt.RichText); lay.addWidget(self.warn)
 
@@ -62,6 +64,14 @@ class ResultsTab(QWidget):
         self.table_btn.clicked.connect(lambda: self.open_table()); t.addWidget(self.table_box, 1); t.addWidget(self.table_btn); lay.addLayout(t)
         self.layers_btn = QPushButton("Show measured cells on the selected image"); self.layers_btn.clicked.connect(lambda: self.show_layers())
         lay.addWidget(self.layers_btn)
+        q = QHBoxLayout(); q.addWidget(QLabel("Leave out least reliable bundles (%):"))
+        self.drop_box = QSpinBox(); self.drop_box.setRange(0, 50); self.drop_box.setSingleStep(5); self.drop_box.setValue(0)
+        self.drop_box.setToolTip("Share of top-view bundles in each cell type left out before the group tests, ranked by an "
+                                 "outlier score on outline shape plus low detector confidence (list: bundle_reliability_cells.csv)")
+        self.redo_same_btn = QPushButton("Redo statistics"); self.redo_same_btn.clicked.connect(lambda: self.redo_statistics(same_groups=True))
+        q.addWidget(self.drop_box); q.addWidget(self.redo_same_btn, 1); lay.addLayout(q)
+        self.report_btn = QPushButton("Open the results report"); self.report_btn.setToolTip("Word report and four CSV tables in the run's report folder")
+        self.report_btn.clicked.connect(lambda: self.open_report()); lay.addWidget(self.report_btn)
         self.redo_btn = QPushButton("Redo statistics with a genotype table...")
         self.redo_btn.setToolTip("Recompute every group test of this run from a table with columns mouse, group, without measuring again")
         self.redo_btn.clicked.connect(lambda: self.redo_statistics()); lay.addWidget(self.redo_btn)
@@ -114,13 +124,16 @@ class ResultsTab(QWidget):
         k = self.group_box.currentIndex(); groups = sorted({c.group for c in self._comparisons})
         keep = [c for c in self._comparisons if k <= 0 or c.group == groups[k - 1]]
         if not self.all_box.isChecked(): keep = [c for c in keep if c.level in SHOWN_BY_DEFAULT]
+        if getattr(self, "p05_box", None) is not None and self.p05_box.isChecked():
+            keep = [c for c in keep if (c.p == c.p and c.p < 0.05) or (c.p_noise_adjusted == c.p_noise_adjusted and c.p_noise_adjusted < 0.05)]
         return keep
 
     def _fill_comparisons(self):
         rows = self.shown_comparisons(); self.table.setRowCount(len(rows)); n_warn = 0
         for i, c in enumerate(rows):
             vals = [c.label, c.group, c.level, _fmt(c.control_median), _fmt(c.group_median), _fmt(c.difference),
-                    _p(c.p) + (f" ({c.mice_control} v {c.mice_group} mice)" if c.mice_group else ""), _p(c.p_adjusted)]
+                    _p(c.p) + (f" ({c.mice_control} v {c.mice_group} mice)" if c.mice_group else ""), _p(c.p_adjusted),
+                    _fmt(c.difference_adjusted), _p(c.p_noise_adjusted)]
             tip = c.note + ("\n\n" + "\n".join(c.warnings) if c.warnings else "")
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(("! " if (j == 0 and c.warnings) else "") + str(v)); it.setToolTip(tip)
@@ -184,12 +197,26 @@ class ResultsTab(QWidget):
                                        properties=props or None)
         return data
 
+    def open_report(self):
+        """Open the results report of this run (report_run.py), or its folder."""
+        if self.results is None:
+            self.status.setText(f"<span style='color:{WARN}'>Open a results folder first.</span>"); return None
+        d = os.path.join(self.results.folder, "report")
+        for name in ("Cochlea_results.docx", "Cochlea_results.md"):
+            p = os.path.join(d, name)
+            if os.path.exists(p): QDesktopServices.openUrl(QUrl.fromLocalFile(p)); return p
+        self.status.setText(f"<span style='color:{WARN}'>No report yet; press Redo statistics to write it.</span>"); return None
+
     # redo statistics ---------------------------------------------------------------------------------------------
-    def redo_statistics(self, groups_csv: str = "", control: str = ""):
-        """Run phenotype_statistics.py on this results folder with another genotype table; reload when it finishes."""
+    def redo_statistics(self, groups_csv: str = "", control: str = "", same_groups: bool = False):
+        """Run phenotype_statistics.py on this results folder (another genotype table unless same_groups, and the share of
+        least reliable bundles set in the box); reload when it finishes."""
         from ._run import groups_in_table, redo_statistics_command
         if self.results is None:
             self.status.setText(f"<span style='color:{WARN}'>Open a results folder first.</span>"); return None
+        drop = self.drop_box.value() / 100.0
+        if same_groups:
+            return self._start_redo("", "", drop, "the run's genotypes")
         if not groups_csv:
             groups_csv, _ = QFileDialog.getOpenFileName(self, "Genotype table (columns mouse, group)", self.results.folder, "Tables (*.csv)")
             if not groups_csv: return None
@@ -200,9 +227,13 @@ class ResultsTab(QWidget):
             start = groups.index("control") if "control" in groups else 0
             control, ok = QInputDialog.getItem(self, "Control group", "Control group:", groups, start, False)
             if not ok: return None
+        return self._start_redo(groups_csv, control, drop, f"{os.path.basename(groups_csv)} (control: {control})")
+
+    def _start_redo(self, groups_csv, control, drop, what):
+        from ._run import redo_statistics_command
         try:
-            argv, env = redo_statistics_command(self.results.folder, groups_csv, control)
-        except FileNotFoundError as e:
+            argv, env = redo_statistics_command(self.results.folder, groups_csv or "", control, drop_share=drop)
+        except (FileNotFoundError, ValueError) as e:
             self.status.setText(f"<span style='color:{WARN}'>{e}</span>"); return None
         pe = QProcessEnvironment()
         for k, v in env.items(): pe.insert(k, v)
@@ -210,15 +241,16 @@ class ResultsTab(QWidget):
         self._proc.setWorkingDirectory(os.path.dirname(argv[1]))
         folder = self.results.folder
         self._proc.finished.connect(lambda code, _status: self._redo_done(code, folder))
-        self.redo_btn.setEnabled(False)
-        self.status.setText(f"Redoing the statistics with {os.path.basename(groups_csv)} (control: {control}); this takes a few minutes...")
+        self.redo_btn.setEnabled(False); self.redo_same_btn.setEnabled(False)
+        left = f", leaving out the {drop:.0%} least reliable bundles" if drop > 0 else ""
+        self.status.setText(f"Redoing the statistics with {what}{left}; this takes a few minutes...")
         self._proc.start(argv[0], argv[1:])
         return argv
 
     def _redo_done(self, code: int, folder: str):
         out = bytes(self._proc.readAll()).decode("utf-8", "replace") if self._proc is not None else ""
         with open(os.path.join(folder, "redo_statistics_log.txt"), "w", encoding="utf-8") as fh: fh.write(out)
-        self.redo_btn.setEnabled(True)
+        self.redo_btn.setEnabled(True); self.redo_same_btn.setEnabled(True)
         if code == 0:
             self.load(folder); self.status.setText(self.status.text() + "<br>Statistics redone; tables updated (log: redo_statistics_log.txt).")
         else:

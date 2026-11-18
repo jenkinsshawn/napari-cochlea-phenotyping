@@ -86,6 +86,7 @@ def test_results_tab(tmp_path):
     assert not t.load(str(tmp_path / "missing")) and "no results folder" in t.status.text()
     assert t.load(str(_results_folder(tmp_path)))
     assert t.cards.rowCount() == 1 and "93.4%" in t.cards.item(0, 1).text()
+    t.p05_box.setChecked(False)   # show comparisons at any P
     assert t.table.rowCount() == 1 and "1 comparisons of quality checks" in t.warn.text()   # unvalidated measures hidden by default
     t.all_box.setChecked(True); assert t.table.rowCount() == 2
     assert t.table.item(0, 0).text().startswith("! ") and "(2 v 3 mice)" in t.table.item(0, 6).text()

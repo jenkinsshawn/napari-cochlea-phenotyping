@@ -27,6 +27,10 @@ BUNDLE_SIDE = -1      # bundles lie toward lower plane numbers (checked by eye i
 Z_SCALE = 0.84        # nominal z distances x 0.84 = true distances (oil objective into watery tissue; measured on the
                       # stacked cell layers of three fields). Measure again for a different objective or mounting.
 
+# Bundle outlines ---------------------------------------------------------------------------------------------------
+SMOOTH_BUNDLE_OUTLINE = True  # bundle measures use the detector outline with holes filled, its largest piece only, and a
+                              # smoothed edge (Gaussian, 1.3 px); 143 of 192 bundle measures robust against 107 unsmoothed
+
 # Standardization (tested 12 Nov 2026 against brightness changes; see the plan) ------------------------------------
 SURFACE_CLEAR_RATIO = 2.0     # a 7 um square shows clear phalloidin when (its brightest layer - field background) is at
                               # least this many times (its median layer - field background); background = 1st percentile

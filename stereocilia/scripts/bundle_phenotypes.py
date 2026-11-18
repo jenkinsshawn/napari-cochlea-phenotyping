@@ -16,6 +16,14 @@ uses values rescaled per bundle to its own 1st and 99.5th percentiles (gain and 
   shape                        area_um2, perimeter_um, solidity, eccentricity, major_um, minor_um, skeleton_um,
                                branch_points, thickness_um, thickness_cv, pieces, largest_piece_share
   height                       tip_height_um, tip_height_sd_um, top_p90_um, volume_um3
+  position (not phenotypes)    local_depth_um, local_slope_deg: depth and slope of the cell surface at the bundle
+                               (field_quality.local_surface), for noise adjustment in phenotype_statistics.py
+  outline ring                 outline_ring_um2: area the outline nearly encloses (it runs onto the rim below the bundle);
+                               used by the reliability ranking, not tested as a phenotype
+  detector confidence          confidence: mean detector probability in the bundle (0-1), used to rank bundles by
+                               reliability in phenotype_statistics.py, not tested as a phenotype
+
+Outlines are smoothed first when SMOOTH_BUNDLE_OUTLINE is True in the settings (or the environment variable is 1).
 
 Conditions (robustness): base; outline eroded 1 px; outline grown 1 px; planes 0.6-5.4 um; added noise
 (Gaussian, SD equal to the field's own high-frequency noise).
@@ -26,6 +34,7 @@ Run (imaging env, scripts folder):  python bundle_phenotypes.py
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline_settings as S
+import field_quality as FQ
 import glob
 import numpy as np, pandas as pd
 from scipy import ndimage as ndi, stats
@@ -35,6 +44,7 @@ from skimage.morphology import skeletonize
 
 PAINT = os.path.join(S.WORK, "paint_stacks")
 BUND = os.path.join(S.WORK, "bundles_detector")
+PROB = os.path.join(S.WORK, "bundle_prob")   # detector voxel probabilities (optional; gives each bundle a confidence)
 LEVELS = 16
 DISTANCES = (1, 2, 3)
 ANGLES = (0, np.pi / 4, np.pi / 2, 3 * np.pi / 4)
@@ -42,6 +52,15 @@ TOP_LOW_UM, TOP_HIGH_UM = 0.3, 6.0
 GROW_UM = 0.5
 STRIP_PX = 3
 MIN_PIECE_UM2 = 0.05
+SMOOTH_OUTLINE = bool(getattr(S, "SMOOTH_BUNDLE_OUTLINE", False)) or os.environ.get("SMOOTH_BUNDLE_OUTLINE", "") == "1"
+SMOOTH_SIGMA_PX = 1.3
+
+
+def smooth_outline(m):
+    """Detector outline with holes filled, only its largest piece kept and its edge smoothed (Gaussian, SMOOTH_SIGMA_PX)."""
+    m = ndi.binary_fill_holes(m); lab_, n = ndi.label(m)
+    if n > 1: m = lab_ == (1 + int(np.argmax(ndi.sum(m, lab_, range(1, n + 1)))))
+    return ndi.binary_fill_holes(ndi.gaussian_filter(m.astype(np.float32), SMOOTH_SIGMA_PX) > 0.5)
 PROPS = ("contrast", "dissimilarity", "homogeneity", "energy", "correlation")
 CONDITIONS = ("base", "eroded", "grown", "planes", "noise")
 
@@ -90,6 +109,9 @@ def measure(im, st, offs, mc, bg, px):
     out["bundle_to_surface"] = float(np.median(v) / sv) if sv and sv > 0 else np.nan
     rp = regionprops(label(mc))
     rp = max(rp, key=lambda r: r.area)
+    # outline running onto the rim below the bundle: area enclosed once small gaps are closed (not a phenotype; used by the
+    # reliability ranking in phenotype_statistics.py)
+    out["outline_ring_um2"] = float((ndi.binary_fill_holes(ndi.binary_closing(mc, iterations=3)).sum() - mc.sum()) * px * px)
     out.update(area_um2=float(mc.sum() * px * px), perimeter_um=float(rp.perimeter * px), solidity=float(rp.solidity),
                eccentricity=float(rp.eccentricity), major_um=float(rp.axis_major_length * px), minor_um=float(rp.axis_minor_length * px))
     out["skeleton_um"] = float(sk.sum() * px)
@@ -100,10 +122,11 @@ def measure(im, st, offs, mc, bg, px):
     out["thickness_cv"] = float(dt.std() / dt.mean()) if len(dt) and dt.mean() > 0 else np.nan
     pieces = label((sc >= 0.5) & mc); areas = np.bincount(pieces.ravel())[1:] * px * px; areas = areas[areas >= MIN_PIECE_UM2]
     out["pieces"] = int(len(areas)); out["largest_piece_share"] = float(areas.max() / areas.sum()) if len(areas) else np.nan
+    offs = np.asarray(offs, float) * getattr(S, "Z_SCALE", 1.0)   # nominal plane offsets to true distance along the optical axis
     pk = st.max(axis=0); hit = st >= 0.5 * pk[None]; th = offs[np.argmax(hit, axis=0)]
     out["tip_height_um"] = float(np.median(th[mc])); out["tip_height_sd_um"] = float(np.std(th[mc]))
     out["top_p90_um"] = float(np.percentile(th[mc], 90))
-    dz = abs(offs[0] - offs[1]) if len(offs) > 1 else 0.3
+    dz = abs(offs[0] - offs[1]) if len(offs) > 1 else 0.3 * getattr(S, "Z_SCALE", 1.0)
     out["volume_um3"] = float((hit & mc[None]).sum() * px * px * dz)
     return out
 
@@ -115,6 +138,10 @@ def field_cells(fld, conditions=CONDITIONS, seed=0):
     views = {}
     for name, (a, b) in {"base": (TOP_LOW_UM, TOP_HIGH_UM), "planes": (0.6, 5.4)}.items():
         sel = (off >= a) & (off <= b); o = np.argsort(-off[sel]); st = phal[sel][o]; views[name] = (st, off[sel][o], st.max(axis=0))
+    prob = None
+    if os.path.exists(os.path.join(PROB, fld + ".npz")):
+        prob = np.load(os.path.join(PROB, fld + ".npz"))["prob"]; keep_planes = off >= TOP_LOW_UM; grow_c = int(round(0.5 / px))
+    smaps = FQ.surface_maps(fld)
     st0, of0, top0 = views["base"]
     hp = top0 - ndi.gaussian_filter(top0, 1.0)
     bgm = (ndi.binary_dilation(lab > 0, iterations=10) == 0) & (top0 < np.percentile(top0, 50))
@@ -127,6 +154,15 @@ def field_cells(fld, conditions=CONDITIONS, seed=0):
         ys, xs = np.nonzero(m); pad = int(round(2.0 / px))
         y0, y1 = max(ys.min() - pad, 0), min(ys.max() + pad + 1, m.shape[0]); x0, x1 = max(xs.min() - pad, 0), min(xs.max() + pad + 1, m.shape[1])
         mc0 = m[y0:y1, x0:x1]
+        conf = np.nan; ldep, lslp = FQ.local_surface(fld, [xs.mean()], [ys.mean()], smaps)
+        if prob is not None:   # mean detector probability over the largest connected piece of voxels >= 0.5 (outline grown 0.5 um)
+            p = prob[:, y0:y1, x0:x1].astype(np.float32) / 255.0
+            v = (p >= 0.5) & ndi.binary_dilation(mc0, iterations=grow_c)[None] & keep_planes[:, None, None]
+            cc, n = ndi.label(v, structure=np.ones((3, 3, 3)))
+            if n: conf = float(p[cc == 1 + int(np.argmax(ndi.sum(v, cc, range(1, n + 1))))].mean())
+        if SMOOTH_OUTLINE:
+            mc0 = smooth_outline(mc0)
+            if mc0.sum() < 20: continue
         for cond in conditions:
             st, offs, top = views["planes" if cond == "planes" else "base"]
             im = top[y0:y1, x0:x1].copy(); sc_ = st[:, y0:y1, x0:x1]
@@ -139,7 +175,8 @@ def field_cells(fld, conditions=CONDITIONS, seed=0):
             o = measure(im, sc_, offs, mc, bg, px)
             if o is None: continue
             o.update(field=fld, cell=int(r.cell), row=r.row, shape_check=r.get("shape_check", ""), condition=cond,
-                     x=float(xs.mean()), y=float(ys.mean()), noise_sd=float(noise_sd))
+                     x=float(xs.mean()), y=float(ys.mean()), noise_sd=float(noise_sd), confidence=conf,
+                     local_depth_um=float(ldep[0]), local_slope_deg=float(lslp[0]))
             rows.append(o)
     return rows
 

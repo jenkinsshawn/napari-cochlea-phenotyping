@@ -4,7 +4,8 @@ Training examples
     Bundle: Shawn's red strokes from paint_bundles.py (E:\\Webber_confocal\\annotations\\bundle_strokes).
     Not bundle: his blue strokes (second round, painted over the band, borders and gaps at
     bundle heights), except within 0.5 um of a red stroke in the same image; the rest of each
-    outer hair cell he painted, more than 1.2 um from its red stroke, at the stroke's heights;
+    outer hair cell he painted, more than REST_MARGIN_UM (default 1.2 um, --rest-margin) from its red stroke, at the
+    stroke's heights;
     and examples taken where no bundle can be:
       - every image 0.6 um or more below the cell surface,
       - each hair cell's own cuticular plate: pixels inside the cell outline at the image where
@@ -41,12 +42,14 @@ from scipy import ndimage as ndi
 from skimage.feature import hessian_matrix, hessian_matrix_eigvals
 from sklearn.ensemble import RandomForestClassifier
 import joblib
+import gpu_forest
 warnings.filterwarnings("ignore")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
 STACKS = os.path.join(S.WORK, 'paint_stacks')
 STROKES = os.path.join(S.ANNOTATIONS, 'bundle_strokes')
+REST_MARGIN_UM = 1.2
 CELLS = os.path.join(S.WORK, 'cells')
 ANN = os.path.join(S.ANNOTATIONS, 'cells')
 TYPES = os.path.join(CELLS, "types")
@@ -134,8 +137,8 @@ def examples(field):
     for k in range(phal.shape[0]):
         if red[k].any() and blue[k].any():
             blue[k] &= ~ndi.binary_dilation(red[k], iterations=r5)
-    # rest of each painted outer hair cell at the heights of its red stroke: more than 1.2 um from the stroke
-    rest = np.zeros(phal.shape, bool); r12 = int(round(1.2 / PX))
+    # rest of each painted outer hair cell at the heights of its red stroke: more than REST_MARGIN_UM from the stroke
+    rest = np.zeros(phal.shape, bool); r12 = int(round(REST_MARGIN_UM / PX))
     ohc_ids = types.cell[types.row.isin(["OHC1", "OHC2", "OHC3"])].values
     for k in np.unique(np.nonzero(red)[0]):
         cr = np.unique(cells[red[k]]); cr = cr[np.isin(cr, ohc_ids)]
@@ -205,10 +208,12 @@ def check(public=False):
         t0 = time.time(); data[f] = examples(f)
         print(f"  examples {f}: {data[f][2]} ({time.time() - t0:.0f} s)", flush=True)
     rows = []
+    held = [x.strip() for x in os.environ.get("BUNDLE_CHECK_FIELDS", "").split(",") if x.strip()]   # leave out only these (default all)
     for f in fields:
+        if held and f not in held: continue
         Xtr = np.concatenate([data[g][0] for g in fields if g != f] + ([pub[0]] if pub else []))
         ytr = np.concatenate([data[g][1] for g in fields if g != f] + ([pub[1]] if pub else []))
-        m = forest().fit(Xtr, ytr)
+        m = gpu_forest.wrap(forest().fit(Xtr, ytr))
         p = m.predict_proba(data[f][0])[:, 1]; s = data[f][3]
         row = dict(left_out=f)
         for name in ("bundle", "automatic", "blue", "cell rest"):
@@ -218,6 +223,7 @@ def check(public=False):
         rows.append(row)
         print("  ", rows[-1], flush=True)
     name = "bundle_detector_check_with_public.csv" if public else "bundle_detector_check.csv"
+    if REST_MARGIN_UM != 1.2: name = name.replace(".csv", f"_rest{REST_MARGIN_UM:g}um.csv")
     pd.DataFrame(rows).to_csv(os.path.join(S.RESULTS, name), index=False)
 
 
@@ -238,7 +244,7 @@ def train(public=False):
 def predict(only, public=False):
     global USE_HEIGHT
     saved = joblib.load(MODELS[public])
-    m = saved["forest"]; USE_HEIGHT = saved["height"]; m.n_jobs = int(os.environ.get("BUNDLE_JOBS", -1))
+    m = saved["forest"]; USE_HEIGHT = saved["height"]; m.n_jobs = int(os.environ.get("BUNDLE_JOBS", -1)); m = gpu_forest.wrap(m)
     os.makedirs(PROB, exist_ok=True)
     fields = [os.path.basename(f)[:-4] for f in sorted(glob.glob(os.path.join(STACKS, "*.npz")))]
     for f in [f for f in fields if only in f]:
@@ -262,7 +268,9 @@ if __name__ == "__main__":
     ap.add_argument("--check", action="store_true"); ap.add_argument("--train", action="store_true")
     ap.add_argument("--predict", action="store_true"); ap.add_argument("--only", default="")
     ap.add_argument("--public", action="store_true", help="add the resampled VASCilia bundle outlines to training")
+    ap.add_argument("--rest-margin", type=float, default=1.2, help="the rest of each painted outer hair cell counts as not bundle beyond this distance from its red stroke (um)")
     a = ap.parse_args()
+    REST_MARGIN_UM = a.rest_margin
     if a.check: check(a.public)
     if a.train: train(a.public)
     if a.predict: predict(a.only, a.public)

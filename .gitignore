@@ -1,4 +1,18 @@
 __pycache__/
-*.pyc
 *.egg-info/
+*.pyc
 .pytest_cache/
+.Rhistory
+# images and model files stay out of the repository
+*.nd2
+*.czi
+*.lif
+*.tif
+*.tiff
+*.npz
+*.pth
+
+# download-and-install script, shared in the folder only
+Install_Harp.ps1
+Install_Harp.bat
+Install_Harp_log.txt

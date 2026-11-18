@@ -1,9 +1,11 @@
-"""The Cochlea Phenotyping panel: one tab per step.
+"""The Harp panel: one tab per step.
 
 The device is found automatically and shown at the top (set COCHLEA_PHENOTYPING_DEVICE=cpu to force the processor).
 Each step's output is an editable napari layer that the next step reads.
 """
 from __future__ import annotations
+
+import os
 
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import QLabel, QScrollArea, QTabWidget, QVBoxLayout, QWidget
@@ -30,7 +32,12 @@ class CochleaPhenotyping(QWidget):
         super().__init__()
         self.viewer = napari_viewer; self.device: Device | None = None
         lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8)
-        lay.addWidget(QLabel(f"<b>Cochlea Phenotyping</b>  <span style='color:gray'>v{__version__}</span>"))
+        banner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "harp_banner.png")
+        if os.path.exists(banner):   # outer hair cell bundles of rows 1 and 2 from a control field
+            from qtpy.QtGui import QPixmap
+            pic = QLabel(); pm = QPixmap(banner)
+            if not pm.isNull(): pic.setPixmap(pm.scaledToWidth(320, Qt.SmoothTransformation)); lay.addWidget(pic)
+        lay.addWidget(QLabel(f"<b>Harp</b>  <span style='color:gray'>v{__version__}</span>"))
         self.device_label = QLabel("Looking for a graphics card..."); self.device_label.setWordWrap(True)
         self.device_label.setTextFormat(Qt.RichText); lay.addWidget(self.device_label)
         self.tabs = QTabWidget()

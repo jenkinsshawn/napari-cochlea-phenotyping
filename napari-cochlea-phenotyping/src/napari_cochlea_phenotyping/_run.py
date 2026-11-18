@@ -78,7 +78,7 @@ class RunPlan:
             raise ValueError("; ".join(bad))
         for d in (self.results_folder, self.work_folder, self.annotations_folder):
             os.makedirs(d, exist_ok=True)
-        lines = ["# Written by the Cochlea Phenotyping panel for one run; values not given here keep the pipeline's defaults.",
+        lines = ["# Written by the Harp panel for one run; values not given here keep the pipeline's defaults.",
                  f"DATASET_SETTINGS = {self.settings_json!r}", f"RAW = {self.image_folder!r}",
                  f"WORK = {self.work_folder!r}", f"RESULTS = {self.results_folder!r}",
                  f"ANNOTATIONS = {self.annotations_folder!r}", f"MODELS = {self.models_folder!r}",
@@ -153,17 +153,25 @@ def parse_step_list(text: str) -> List[tuple]:
     return out
 
 
-def redo_statistics_command(results_folder: str, groups_csv: str, control: str = "",
-                            scripts_folder: Optional[str] = None, python: Optional[str] = None):
-    """Command and environment that redo the statistics of a finished run with another genotype table (columns mouse,
-    group), without measuring again. Returns (argv, env) or raises FileNotFoundError."""
+def redo_statistics_command(results_folder: str, groups_csv: str = "", control: str = "",
+                            scripts_folder: Optional[str] = None, python: Optional[str] = None, drop_share: float = 0.0):
+    """Command and environment that redo the statistics of a finished run without measuring again, with another
+    genotype table (columns mouse, group; empty keeps the run's genotypes) and leaving out the given share (0-0.5) of
+    the least reliable top-view bundles in each cell type. Both the unadjusted and the noise-adjusted tests are run and
+    the results report is rewritten. Returns (argv, env) or raises FileNotFoundError."""
     import sys
     sc = scripts_folder or find_scripts_folder()
     if not sc or not os.path.exists(os.path.join(sc, "phenotype_statistics.py")):
         raise FileNotFoundError(f"pipeline scripts not found; set {SCRIPTS_ENV}")
-    if not os.path.exists(groups_csv):
+    if groups_csv and not os.path.exists(groups_csv):
         raise FileNotFoundError(groups_csv)
-    argv = [python or sys.executable, os.path.join(sc, "phenotype_statistics.py"), "--groups", groups_csv]
+    if not 0 <= drop_share <= 0.5:
+        raise ValueError("drop_share must be between 0 and 0.5")
+    argv = [python or sys.executable, os.path.join(sc, "phenotype_statistics.py"), "--with-noise-adjusted", "--report"]
+    if groups_csv:
+        argv += ["--groups", groups_csv]
+    if drop_share > 0:
+        argv += ["--drop-least-reliable", f"{drop_share:g}"]
     if control:
         argv += ["--control", control]
     env = dict(os.environ); env["PYTHONPATH"] = ""

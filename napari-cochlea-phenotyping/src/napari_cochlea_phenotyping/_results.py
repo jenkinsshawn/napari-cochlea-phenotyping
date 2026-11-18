@@ -53,6 +53,11 @@ TABLES = {   # results files shown in the tab: label -> file name in the results
     "bundle measures per bundle": "bundle_phenotypes_cells.csv", "bundle measure robustness": "bundle_phenotype_robustness.csv",
     "hair cell surface and bundle direction per cell": "hair_cell_surface_polarity_cells.csv",
     "field values of every measure": "phenotype_field_values_long.csv",
+    "phenotype statistics, noise adjusted": "phenotype_statistics_all_noise_adjusted.csv",
+    "noise adjustment: depth and slope effects": "noise_adjustment_effects.csv", "image quality per field": "field_quality.csv",
+    "outer hair cell row straightness and order": "row_order_fields.csv",
+    "hair cell nuclei and chromatin per cell": "hair_cell_nuclei_cells.csv", "hair cell identity per cell": "hair_cell_identity_cells.csv",
+    "least reliable bundles (ranking)": "bundle_reliability_cells.csv",
 }
 
 
@@ -99,10 +104,15 @@ class Comparison:
     level: str
     note: str
     warnings: List[str] = field(default_factory=list)
+    family: str = ""
+    cell_type: str = ""
+    difference_adjusted: float = float("nan")
+    p_noise_adjusted: float = float("nan")
+    name: str = ""
 
     @property
     def label(self) -> str:
-        return label(self.measure)
+        return self.name or label(self.measure)
 
 
 def _mouse_counts(ft: Optional[pd.DataFrame], measure: str, group: str, control: str):
@@ -140,6 +150,52 @@ def comparisons(G: pd.DataFrame, ft: Optional[pd.DataFrame] = None, control: str
     return out
 
 
+HAND_FAMILIES = ("density (corrected hand reference)", "inner hair cell organization (hand scores)", "inner hair cell height (hand clicks)")
+CELLS = {"IHC": "inner hair cells", "OHC1": "outer row 1", "OHC2": "outer row 2", "OHC3": "outer row 3", "all": "all hair cells"}
+
+
+def _readable():
+    """Readable measure names from the pipeline's measure_names.py, when the scripts folder is found."""
+    try:
+        import importlib, sys
+        from ._run import find_scripts_folder
+        sc = find_scripts_folder()
+        if sc and sc not in sys.path: sys.path.insert(0, sc)
+        return importlib.import_module("measure_names").readable
+    except Exception:
+        return lambda m: m.replace("_", " ")
+
+
+def phenotype_comparisons(T: pd.DataFrame, A: Optional[pd.DataFrame] = None, fields_used: str = "flagged fields left out") -> List[Comparison]:
+    """One entry per measure and group against the control, from phenotype_statistics_all.csv (all turns, damaged
+    fields left out), with the noise-adjusted difference and P from phenotype_statistics_all_noise_adjusted.csv."""
+    key = ["family", "cell_type", "measure"]
+    T = T[(T.fields == fields_used) & (T.turn == "all turns") & T.tested.astype(bool)]
+    Ai = A[(A.fields == fields_used) & (A.turn == "all turns")].set_index(key) if A is not None else None
+    groups = [c[:-5] for c in T.columns if c.endswith("_mean")]
+    if len(groups) < 2: return []
+    control, others = groups[0], groups[1:]; readable = _readable(); out = []
+    for _, r in T.iterrows():
+        fam = str(r.family)
+        lvl = "not validated" if ("not validated" in fam or r.get("robustness") == "unstable") else ("validated" if fam in HAND_FAMILIES else "partly checked")
+        ad = Ai.loc[tuple(r[key])] if Ai is not None and tuple(r[key]) in Ai.index else None
+        for g in others:
+            t = g.replace("-", "_")
+            if f"{t}_difference" not in r: continue
+            d, da = r[f"{t}_difference"], (ad[f"{t}_difference"] if ad is not None else float("nan"))
+            w = []
+            if lvl == "not validated": w.append("not validated: " + ("no hand check for this family" if "not validated" in fam else "unstable under the processing changes"))
+            if da == da and d == d and abs(da - d) > 0.2 * max(abs(d), 1e-9):
+                w.append(f"noise adjustment (surface depth and slope) changes the difference from {d:.3g} to {da:.3g}")
+            out.append(Comparison(measure=r.measure, group=g, control_median=r.get(f"{control}_mean"), group_median=r.get(f"{g}_mean"), difference=d,
+                                  p=r.get(f"{t}_P"), p_adjusted=r.get(f"{t}_P_adj"), p_model=float("nan"), mice_control=0, mice_group=0,
+                                  level=lvl, note=f"{fam}; three-group P {r.get('P_three_group'):.3g}", warnings=w, family=fam, cell_type=str(r.cell_type),
+                                  difference_adjusted=da, p_noise_adjusted=(ad[f"{t}_P"] if ad is not None else float("nan")),
+                                  name=f"{readable(r.measure)} ({CELLS.get(r.cell_type, r.cell_type)})"))
+    out.sort(key=lambda c: (LEVELS.index(c.level), c.p if c.p == c.p else 2.0))
+    return out
+
+
 @dataclass
 class Results:
     folder: str
@@ -152,6 +208,9 @@ class Results:
         return pd.read_csv(p) if p and os.path.exists(p) else None
 
     def comparisons(self) -> List[Comparison]:
+        T = self.read("phenotype statistics (all measures, all turns and each turn)")
+        if T is not None and not T.empty and "tested" in T:
+            return phenotype_comparisons(T, self.read("phenotype statistics, noise adjusted"))
         G = self.read("group comparisons")
         if G is None or G.empty: return []
         return comparisons(G, self.read("fields"), self.control)

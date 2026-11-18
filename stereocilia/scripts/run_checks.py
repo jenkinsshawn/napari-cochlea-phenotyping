@@ -214,6 +214,43 @@ def check_ranges():
     return not bad, ("all shares within 0-1 and no negative counts" if not bad else "; ".join(bad))
 
 
+def extra_cards():
+    """Cards for measures checked by correlation or by a blind look: row straightness against the hand-clicked rows,
+    cell-top Calb2 against the Calb2 ring of the cell's nucleus, and the blind outline check of hair cell nuclei."""
+    from scipy.stats import spearmanr
+    out = []
+    a, b = os.path.join(RESULTS, "row_order_fields.csv"), os.path.join(RESULTS, "row_order_reference_fields.csv")
+    if os.path.exists(a) and os.path.exists(b):
+        m = pd.read_csv(a).merge(pd.read_csv(b), on=["field", "row"], suffixes=("", "_hand"))
+        if len(m) >= 5:
+            out.append(dict(measure="outer hair cell row straightness", agreement_rule="Spearman correlation of each field and row's median distance from the row line with the same from the hand-clicked rows",
+                            cells=len(m), fields=m.field.nunique(), mice=m.field.map(S.mouse_of).nunique(), correlation=round(float(spearmanr(m.row_line_deviation_um, m.row_line_deviation_um_hand)[0]), 2),
+                            reference="hand-clicked outer hair cell rows (corrected reference)", assessed_on="this dataset"))
+    c = os.path.join(RESULTS, "hair_cell_identity_cells.csv")
+    if os.path.exists(c):
+        d = pd.read_csv(c)
+        d = d[d.row.isin(["OHC1", "OHC2", "OHC3"])].dropna(subset=["calb2_rel"] + (["nucleus_calb2_rel"] if "nucleus_calb2_rel" in d else []))
+        if "nucleus_calb2_rel" in d and len(d) >= 20:
+            out.append(dict(measure="hair cell identity (Calb2)", agreement_rule="Spearman correlation of Calb2 at the cell top with Calb2 around the same cell's nucleus (two separate readouts)",
+                            cells=len(d), fields=d.field.nunique(), mice=d.field.map(S.mouse_of).nunique(), correlation=round(float(spearmanr(d.calb2_rel, d.nucleus_calb2_rel)[0]), 2),
+                            reference="internal agreement, outer hair cells", assessed_on="this dataset"))
+    k, ans = os.path.join(S.ANNOTATIONS, "nucleus_check", "key.csv"), os.path.join(S.ANNOTATIONS, "nucleus_check", "answers.csv")
+    if os.path.exists(k):
+        if os.path.exists(ans):
+            from napari_cochlea_phenotyping import cluster_bootstrap
+            y = pd.read_csv(k).merge(pd.read_csv(ans)[["item", "answer"]], on="item"); y = y[y.answer != "cannot tell"]
+            if len(y):
+                bb = cluster_bootstrap((y.answer == "fits").astype(float).values, y.field.map(S.mouse_of).values, seed=0)
+                out.append(dict(measure="hair cell nucleus outlines", agreement_rule="blind look: the outline fits one whole nucleus (inner and outer hair cells)", cells=len(y),
+                                fields=y.field.nunique(), mice=y.field.map(S.mouse_of).nunique(), agreement_pct=round(100 * bb["estimate"], 1),
+                                interval_low_pct=round(100 * max(bb["low"], 0), 1), interval_high_pct=round(100 * min(bb["high"], 1), 1),
+                                interval_method="95%, resampling mice, small-sample corrected", reference="check_nuclei.py", assessed_on="this dataset"))
+        else:
+            out.append(dict(measure="hair cell nucleus outlines", agreement_rule="not assessed: the blind outline check (check_nuclei.py) has not been done yet",
+                            reference="check_nuclei.py", assessed_on="this dataset"))
+    return out
+
+
 def write_cards():
     """Validation card per measure: agreement with the hand reference, cells and mice, and a 95% interval from
     resampling mice with the small-sample correction (napari_cochlea_phenotyping.cluster_bootstrap)."""
@@ -231,6 +268,7 @@ def write_cards():
                          interval_high_pct=round(100 * min(b["high"], 1), 1), documented_pct=documented,
                          interval_method="95%, resampling mice, small-sample corrected", reference=notes.get(name, ""),
                          assessed_on="this dataset"))
+    rows += extra_cards()
     if os.path.exists(VALIDATION_REFERENCE):     # measures without a hand reference here: the validation set's card
         ref = pd.read_csv(VALIDATION_REFERENCE); done = {r["measure"] for r in rows}
         rows += [r for r in ref.to_dict("records") if r["measure"] not in done]

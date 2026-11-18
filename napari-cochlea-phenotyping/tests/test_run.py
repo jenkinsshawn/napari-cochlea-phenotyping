@@ -10,7 +10,7 @@ from napari_cochlea_phenotyping._run import (RunMonitor, RunPlan, default_models
 FAKE = """import sys, time
 args = sys.argv[1:]
 settings = args[args.index("--settings") + 1]
-assert open(settings).read().startswith("# Written by the Cochlea Phenotyping panel")
+assert open(settings).read().startswith("# Written by the Harp panel")
 if "--list" in args:
     print(" 1 fields            done  make_field_pictures.py --redo")
     print(" 2 cells_v0          -     outline_cells.py --tag v0")
